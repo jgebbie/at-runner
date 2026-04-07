@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::executor::{self, ExecRequest, StreamEvent};
 use crate::proto::{self, FileChunk};
+use crate::session::new_session_id;
 use crate::AppState;
 
 pub async fn run_pipeline(
@@ -103,6 +104,8 @@ pub async fn run_pipeline(
         return Err(Status::invalid_argument("cycle in dependency graph"));
     }
 
+    let session_id = new_session_id();
+
     let overall_timeout = req
         .timeout_seconds
         .map(|t| Duration::from_secs(t as u64))
@@ -114,6 +117,15 @@ pub async fn run_pipeline(
     let state = state.clone();
     let (out_tx, out_rx) = mpsc::channel(64);
 
+    info!(
+        session_id = %session_id,
+        step_count = steps.len(),
+        step_ids = ?step_ids,
+        overall_timeout_secs = overall_timeout.as_secs(),
+        "RunPipeline started"
+    );
+
+    let pipeline_sid: Arc<String> = Arc::new(session_id);
     tokio::spawn(async move {
         let start = Instant::now();
         let deadline = tokio::time::Instant::now() + overall_timeout;
@@ -172,6 +184,12 @@ pub async fn run_pipeline(
                 return;
             }
         };
+
+        info!(
+            session_id = pipeline_sid.as_str(),
+            temp_dir = %tmp_base.path().display(),
+            "pipeline workspace (temp) created"
+        );
 
         // Find initially ready steps
         let mut ready: VecDeque<String> = steps
@@ -241,7 +259,14 @@ pub async fn run_pipeline(
                     .collect();
 
                 let workspace = state.workspace.clone();
-                if let Err(e) = executor::populate_run_dir(&step_dir, &workspace, &inputs).await {
+                if let Err(e) = executor::populate_run_dir(
+                    pipeline_sid.as_str(),
+                    &step_dir,
+                    &workspace,
+                    &inputs,
+                )
+                .await
+                {
                     let _ = out_tx
                         .send(Err(Status::internal(format!("populate: {e}"))))
                         .await;
@@ -259,7 +284,13 @@ pub async fn run_pipeline(
                                     let _ = tokio::fs::remove_file(&dest).await;
                                 }
                                 if let Err(e) = tokio::fs::copy(src_path, &dest).await {
-                                    tracing::warn!("copy dep output {fname}: {e}");
+                                    tracing::warn!(
+                                        session_id = pipeline_sid.as_str(),
+                                        step_id = %step_id,
+                                        file = %fname,
+                                        error = %e,
+                                        "copy dependency output failed"
+                                    );
                                 }
                             }
                         }
@@ -276,6 +307,17 @@ pub async fn run_pipeline(
                 let done_tx2 = done_tx.clone();
                 let sid = step_id.clone();
                 let chunk_size = state.chunk_size;
+                let exec_session_id = format!("{}:step:{}", pipeline_sid.as_str(), step_id);
+
+                info!(
+                    session_id = pipeline_sid.as_str(),
+                    step_id = %step_id,
+                    model = %step.model,
+                    file_root = %step.file_root,
+                    step_timeout_secs = step_timeout.as_secs(),
+                    step_dir = %step_dir.display(),
+                    "pipeline step executing"
+                );
 
                 // Send StepEvent::Started
                 send(proto::PipelineOutput {
@@ -290,9 +332,11 @@ pub async fn run_pipeline(
                 .await;
 
                 active += 1;
+                let pipeline_sid_task = pipeline_sid.clone();
                 tokio::spawn(async move {
                     let (event_tx, mut event_rx) = mpsc::channel(32);
                     let exec_req = ExecRequest {
+                        session_id: exec_session_id.clone(),
                         executable,
                         file_root: step.file_root,
                         run_dir: step_dir,
@@ -300,9 +344,15 @@ pub async fn run_pipeline(
                     };
 
                     let sid_inner = sid.clone();
+                    let esid = exec_session_id.clone();
                     tokio::spawn(async move {
                         if let Err(e) = executor::run_streaming(exec_req, event_tx).await {
-                            tracing::error!("step {}: exec error: {e}", sid_inner);
+                            tracing::error!(
+                                session_id = %esid,
+                                step_id = %sid_inner,
+                                error = %e,
+                                "pipeline step exec error"
+                            );
                         }
                     });
 
@@ -330,6 +380,25 @@ pub async fn run_pipeline(
                                     == i32::from(proto::RunStatus::Completed)
                                     && completed.exit_code == 0;
 
+                                let file_meta: Vec<(&str, u64)> = files
+                                    .iter()
+                                    .filter_map(|(n, p)| {
+                                        std::fs::metadata(p).ok().map(|m| (n.as_str(), m.len()))
+                                    })
+                                    .collect();
+
+                                tracing::info!(
+                                    session_id = pipeline_sid_task.as_str(),
+                                    step_id = %sid,
+                                    status = completed.status,
+                                    exit_code = completed.exit_code,
+                                    elapsed_secs = completed.elapsed_seconds,
+                                    output_file_count = files.len(),
+                                    output_files = ?file_meta,
+                                    success,
+                                    "pipeline step completed"
+                                );
+
                                 let _ = out_tx2
                                     .send(Ok(proto::PipelineOutput {
                                         payload: Some(proto::pipeline_output::Payload::Step(
@@ -347,8 +416,19 @@ pub async fn run_pipeline(
                                 for (name, path) in &files {
                                     let data = match tokio::fs::read(path).await {
                                         Ok(d) => d,
-                                        Err(_) => continue,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                session_id = pipeline_sid_task.as_str(),
+                                                step_id = %sid,
+                                                file = %name,
+                                                error = %e,
+                                                "skip step output file (read failed)"
+                                            );
+                                            continue;
+                                        }
                                     };
+                                    let len = data.len() as u64;
+                                    let num_chunks = data.len().div_ceil(chunk_size);
                                     let mut offset = 0;
                                     let mut first = true;
                                     while offset < data.len() {
@@ -380,6 +460,15 @@ pub async fn run_pipeline(
                                         first = false;
                                         offset = end;
                                     }
+                                    tracing::info!(
+                                        session_id = pipeline_sid_task.as_str(),
+                                        step_id = %sid,
+                                        file = %name,
+                                        bytes = len,
+                                        chunks = num_chunks,
+                                        chunk_size,
+                                        "streamed pipeline step file to client"
+                                    );
                                 }
 
                                 step_files = files;
@@ -439,10 +528,13 @@ pub async fn run_pipeline(
         let skipped_list: Vec<String> = skipped.into_iter().collect();
 
         info!(
-            elapsed = ?elapsed,
+            session_id = pipeline_sid.as_str(),
+            elapsed_secs = elapsed.as_secs_f64(),
             all_succeeded,
+            failed_steps = ?failed.iter().cloned().collect::<Vec<_>>(),
             skipped = ?skipped_list,
-            "pipeline completed"
+            completed_steps = completed.len(),
+            "RunPipeline completed"
         );
 
         send(proto::PipelineOutput {

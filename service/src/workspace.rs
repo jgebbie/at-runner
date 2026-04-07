@@ -9,6 +9,7 @@ use crate::proto::{
     DeleteFileRequest, DeleteFileResponse, FileChunk, FileInfo, GetFileRequest, ListFilesRequest,
     ListFilesResponse, UploadResponse,
 };
+use crate::session::new_session_id;
 use crate::AppState;
 
 fn validate_filename(name: &str) -> Result<(), Status> {
@@ -27,6 +28,7 @@ pub async fn upload_file(
     state: &Arc<AppState>,
     request: Request<Streaming<FileChunk>>,
 ) -> Result<Response<UploadResponse>, Status> {
+    let session_id = new_session_id();
     let _guard = state.exec_lock.read().await;
 
     let mut stream = request.into_inner();
@@ -52,7 +54,13 @@ pub async fn upload_file(
         .await
         .map_err(|e| Status::internal(format!("write failed: {e}")))?;
 
-    info!(file = %name, size = buf.len(), "uploaded");
+    info!(
+        session_id = %session_id,
+        file = %name,
+        size_bytes = buf.len(),
+        path = %path.display(),
+        "upload_file completed"
+    );
     Ok(Response::new(UploadResponse {
         name,
         size_bytes: buf.len() as u64,
@@ -63,6 +71,7 @@ pub async fn get_file(
     state: &Arc<AppState>,
     request: Request<GetFileRequest>,
 ) -> Result<Response<ReceiverStream<Result<FileChunk, Status>>>, Status> {
+    let session_id = new_session_id();
     let _guard = state.exec_lock.read().await;
 
     let req = request.into_inner();
@@ -78,7 +87,18 @@ pub async fn get_file(
         .map_err(|e| Status::internal(format!("read failed: {e}")))?;
 
     let chunk_size = state.chunk_size;
+    let total = data.len();
+    let num_chunks = total.div_ceil(chunk_size);
     let name = req.name.clone();
+    info!(
+        session_id = %session_id,
+        file = %name,
+        size_bytes = total,
+        chunk_size,
+        chunks = num_chunks,
+        path = %path.display(),
+        "get_file streaming response"
+    );
     let (tx, rx) = mpsc::channel(4);
 
     tokio::spawn(async move {
@@ -105,6 +125,7 @@ pub async fn delete_file(
     state: &Arc<AppState>,
     request: Request<DeleteFileRequest>,
 ) -> Result<Response<DeleteFileResponse>, Status> {
+    let session_id = new_session_id();
     let _guard = state.exec_lock.read().await;
 
     let req = request.into_inner();
@@ -119,7 +140,12 @@ pub async fn delete_file(
         .await
         .map_err(|e| Status::internal(format!("delete failed: {e}")))?;
 
-    info!(file = %req.name, "deleted");
+    info!(
+        session_id = %session_id,
+        file = %req.name,
+        path = %path.display(),
+        "delete_file completed"
+    );
     Ok(Response::new(DeleteFileResponse {}))
 }
 
@@ -127,6 +153,7 @@ pub async fn list_files(
     state: &Arc<AppState>,
     _request: Request<ListFilesRequest>,
 ) -> Result<Response<ListFilesResponse>, Status> {
+    let session_id = new_session_id();
     let _guard = state.exec_lock.read().await;
 
     let mut files = Vec::new();
@@ -154,5 +181,16 @@ pub async fn list_files(
     }
 
     files.sort_by(|a, b| a.name.cmp(&b.name));
+    let summary: Vec<(&str, u64)> = files
+        .iter()
+        .map(|f| (f.name.as_str(), f.size_bytes))
+        .collect();
+    info!(
+        session_id = %session_id,
+        file_count = files.len(),
+        workspace = %state.workspace.display(),
+        files = ?summary,
+        "list_files completed"
+    );
     Ok(Response::new(ListFilesResponse { files }))
 }

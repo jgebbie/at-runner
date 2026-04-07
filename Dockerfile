@@ -27,5 +27,5 @@ COPY --from=at-binaries /at/bin/ /at/bin/
 COPY --from=rust-builder /build/service/target/release/at-runner /usr/local/bin/
 EXPOSE 50051
 HEALTHCHECK --interval=5s --timeout=2s --retries=3 \
-    CMD ["grpc_health_probe", "-addr=:50051"] || exit 1
+    CMD ["grpc_health_probe", "-addr=:50051"]
 CMD ["at-runner", "--bin-dir", "/at/bin", "--workspace", "/workspace", "--port", "50051"]

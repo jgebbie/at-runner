@@ -4,10 +4,12 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::info;
+use tracing::Instrument;
+use tracing::{info, warn};
 
 use crate::executor::{self, ExecRequest, StreamEvent};
 use crate::proto::{self, runner_server::Runner, FileChunk};
+use crate::session::new_session_id;
 use crate::{pipeline, workspace, AppState};
 
 pub struct RunnerService {
@@ -48,6 +50,7 @@ impl Runner for RunnerService {
         &self,
         request: Request<proto::RunSyncRequest>,
     ) -> Result<Response<proto::RunSyncResponse>, Status> {
+        let session_id = new_session_id();
         let req = request.into_inner();
         let executable = self.resolve_executable(&req.model)?;
         let timeout = self.resolve_timeout(req.timeout_seconds);
@@ -63,15 +66,27 @@ impl Runner for RunnerService {
             .map(|f| (f.name, f.content))
             .collect();
 
-        executor::populate_run_dir(&run_dir, &self.state.workspace, &inputs)
+        let input_summary: Vec<(&str, usize)> =
+            inputs.iter().map(|(n, d)| (n.as_str(), d.len())).collect();
+
+        info!(
+            session_id = %session_id,
+            model = %req.model,
+            file_root = %req.file_root,
+            timeout_secs = timeout.as_secs(),
+            inline_input_count = inputs.len(),
+            inline_inputs = ?input_summary,
+            "RunSync started"
+        );
+
+        executor::populate_run_dir(&session_id, &run_dir, &self.state.workspace, &inputs)
             .await
             .map_err(|e| Status::internal(format!("populate: {e}")))?;
 
-        info!(model = %req.model, file_root = %req.file_root, "RunSync");
-
         let result = executor::run_buffered(ExecRequest {
+            session_id: session_id.clone(),
             executable,
-            file_root: req.file_root,
+            file_root: req.file_root.clone(),
             run_dir: run_dir.clone(),
             timeout,
         })
@@ -102,6 +117,23 @@ impl Runner for RunnerService {
                 content,
             });
         }
+
+        let returned: Vec<(&str, usize)> = outputs
+            .iter()
+            .map(|f| (f.name.as_str(), f.content.len()))
+            .collect();
+
+        info!(
+            session_id = %session_id,
+            model = %req.model,
+            status = ?result.status,
+            exit_code = result.exit_code,
+            elapsed_secs = result.elapsed.as_secs_f64(),
+            response_output_count = outputs.len(),
+            response_output_bytes_total = total_output_bytes,
+            response_outputs = ?returned,
+            "RunSync completed"
+        );
 
         Ok(Response::new(proto::RunSyncResponse {
             status: result.status.into(),
@@ -157,6 +189,7 @@ impl Runner for RunnerService {
         &self,
         request: Request<proto::RunRequest>,
     ) -> Result<Response<Self::RunStream>, Status> {
+        let session_id = new_session_id();
         let req = request.into_inner();
         let executable = self.resolve_executable(&req.model)?;
         let timeout = self.resolve_timeout(req.timeout_seconds);
@@ -172,83 +205,138 @@ impl Runner for RunnerService {
         let model = req.model.clone();
         let file_root = req.file_root.clone();
 
-        info!(model = %model, file_root = %file_root, "Run");
+        info!(
+            session_id = %session_id,
+            model = %model,
+            file_root = %file_root,
+            timeout_secs = timeout.as_secs(),
+            run_dir = %workspace.display(),
+            "Run started"
+        );
 
+        let run_span = tracing::info_span!("Run", session_id = %session_id);
         let (out_tx, out_rx) = mpsc::channel(32);
+        let sid = session_id.clone();
 
-        tokio::spawn(async move {
-            let send = |msg: proto::RunOutput| {
-                let tx = out_tx.clone();
-                async move { tx.send(Ok(msg)).await }
-            };
-
-            // Phase 1: RunStarted
-            let _ = send(proto::RunOutput {
-                payload: Some(proto::run_output::Payload::Started(proto::RunStarted {
-                    model: model.clone(),
-                    file_root: file_root.clone(),
-                })),
-            })
-            .await;
-
-            // Phase 2 + 3: Stream output, then completed
-            let (event_tx, mut event_rx) = mpsc::channel(32);
-            let exec_req = ExecRequest {
-                executable,
-                file_root,
-                run_dir: workspace.clone(),
-                timeout,
-            };
-
-            tokio::spawn(async move {
-                if let Err(e) = executor::run_streaming(exec_req, event_tx).await {
-                    tracing::error!("run_streaming error: {e}");
-                }
-            });
-
-            let mut output_files: Vec<(String, std::path::PathBuf)> = Vec::new();
-
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    StreamEvent::Output(chunk) => {
-                        let _ = send(proto::RunOutput {
-                            payload: Some(proto::run_output::Payload::Output(chunk)),
-                        })
-                        .await;
-                    }
-                    StreamEvent::Completed(completed, files) => {
-                        output_files = files;
-                        let _ = send(proto::RunOutput {
-                            payload: Some(proto::run_output::Payload::Completed(completed)),
-                        })
-                        .await;
-                    }
-                }
-            }
-
-            // Phase 4: Stream output files
-            for (name, path) in &output_files {
-                let data = match tokio::fs::read(path).await {
-                    Ok(d) => d,
-                    Err(_) => continue,
+        tokio::spawn(
+            async move {
+                let send = |msg: proto::RunOutput| {
+                    let tx = out_tx.clone();
+                    async move { tx.send(Ok(msg)).await }
                 };
-                let mut offset = 0;
-                let mut first = true;
-                while offset < data.len() {
-                    let end = (offset + chunk_size).min(data.len());
-                    let chunk = FileChunk {
-                        name: if first { name.clone() } else { String::new() },
-                        data: data[offset..end].to_vec(),
-                    };
-                    first = false;
-                    let _ = send(proto::RunOutput {
-                        payload: Some(proto::run_output::Payload::File(chunk)),
-                    })
-                    .await;
-                    offset = end;
+
+                // Phase 1: RunStarted
+                let _ = send(proto::RunOutput {
+                    payload: Some(proto::run_output::Payload::Started(proto::RunStarted {
+                        model: model.clone(),
+                        file_root: file_root.clone(),
+                    })),
+                })
+                .await;
+
+                // Phase 2 + 3: Stream output, then completed
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                let exec_req = ExecRequest {
+                    session_id: sid.clone(),
+                    executable,
+                    file_root,
+                    run_dir: workspace.clone(),
+                    timeout,
+                };
+
+                let exec_span = tracing::Span::current();
+                let sid_exec = sid.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = executor::run_streaming(exec_req, event_tx)
+                        .instrument(exec_span)
+                        .await
+                    {
+                        tracing::error!(session_id = %sid_exec, error = %e, "run_streaming failed");
+                    }
+                });
+
+                let mut output_files: Vec<(String, std::path::PathBuf)> = Vec::new();
+                let mut last_status: Option<i32> = None;
+                let mut last_exit: Option<i32> = None;
+                let mut last_elapsed: Option<f64> = None;
+
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        StreamEvent::Output(chunk) => {
+                            let _ = send(proto::RunOutput {
+                                payload: Some(proto::run_output::Payload::Output(chunk)),
+                            })
+                            .await;
+                        }
+                        StreamEvent::Completed(completed, files) => {
+                            last_status = Some(completed.status);
+                            last_exit = Some(completed.exit_code);
+                            last_elapsed = Some(completed.elapsed_seconds);
+                            output_files = files;
+                            let _ = send(proto::RunOutput {
+                                payload: Some(proto::run_output::Payload::Completed(completed)),
+                            })
+                            .await;
+                        }
+                    }
                 }
+
+                // Phase 4: Stream output files
+                let mut streamed: Vec<(String, u64)> = Vec::new();
+                for (name, path) in &output_files {
+                    let data = match tokio::fs::read(path).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            warn!(
+                                session_id = %sid,
+                                file = %name,
+                                error = %e,
+                                "skip output file (read failed)"
+                            );
+                            continue;
+                        }
+                    };
+                    let len = data.len() as u64;
+                    let mut offset = 0;
+                    let mut first = true;
+                    let num_chunks = data.len().div_ceil(chunk_size);
+                    while offset < data.len() {
+                        let end = (offset + chunk_size).min(data.len());
+                        let chunk = FileChunk {
+                            name: if first { name.clone() } else { String::new() },
+                            data: data[offset..end].to_vec(),
+                        };
+                        first = false;
+                        let _ = send(proto::RunOutput {
+                            payload: Some(proto::run_output::Payload::File(chunk)),
+                        })
+                        .await;
+                        offset = end;
+                    }
+                    streamed.push((name.clone(), len));
+                    info!(
+                        session_id = %sid,
+                        file = %name,
+                        bytes = len,
+                        chunks = num_chunks,
+                        chunk_size,
+                        "streamed output file to client"
+                    );
+                }
+
+                info!(
+                    session_id = %sid,
+                    model = %model,
+                    run_status = ?last_status,
+                    exit_code = ?last_exit,
+                    elapsed_secs = ?last_elapsed,
+                    files_streamed = streamed.len(),
+                    streamed_files = ?streamed,
+                    "Run finished"
+                );
             }
-        });
+            .instrument(run_span),
+        );
 
         Ok(Response::new(ReceiverStream::new(out_rx)))
     }

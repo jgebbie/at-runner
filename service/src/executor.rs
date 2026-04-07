@@ -6,11 +6,12 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::proto::{self, OutputChunk, RunCompleted, RunStatus};
 
 pub struct ExecRequest {
+    pub session_id: String,
     pub executable: PathBuf,
     pub file_root: String,
     pub run_dir: PathBuf,
@@ -37,16 +38,19 @@ pub enum StreamEvent {
 /// If false, workspace files are copied so the workspace is never modified
 /// by the subprocess (required for RunSync temp dirs and pipeline steps).
 pub async fn populate_run_dir(
+    session_id: &str,
     run_dir: &Path,
     workspace: &Path,
     inputs: &[(String, Vec<u8>)],
 ) -> io::Result<()> {
+    let mut workspace_copied = 0u32;
     let mut entries = tokio::fs::read_dir(workspace).await?;
     while let Some(entry) = entries.next_entry().await? {
         let fname = entry.file_name();
         let dest = run_dir.join(&fname);
         if !dest.exists() {
             tokio::fs::copy(entry.path(), &dest).await?;
+            workspace_copied += 1;
         }
     }
 
@@ -54,6 +58,18 @@ pub async fn populate_run_dir(
         let dest = run_dir.join(name);
         tokio::fs::write(&dest, data).await?;
     }
+
+    let inline: Vec<(&str, usize)> = inputs.iter().map(|(n, d)| (n.as_str(), d.len())).collect();
+
+    info!(
+        session_id = %session_id,
+        run_dir = %run_dir.display(),
+        workspace = %workspace.display(),
+        workspace_files_copied = workspace_copied,
+        inline_input_count = inputs.len(),
+        inline_inputs = ?inline,
+        "run directory populated"
+    );
 
     Ok(())
 }
@@ -103,6 +119,16 @@ pub async fn detect_outputs(
 
 /// Run a model, buffering all stdout/stderr. Used by RunSync.
 pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
+    let sid = req.session_id.as_str();
+    info!(
+        session_id = %sid,
+        executable = %req.executable.display(),
+        file_root = %req.file_root,
+        run_dir = %req.run_dir.display(),
+        timeout_secs = req.timeout.as_secs(),
+        "spawning process (buffered)"
+    );
+
     let before = snapshot_dir(&req.run_dir).await?;
     let start = Instant::now();
 
@@ -139,19 +165,51 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
     match timeout_result {
         Ok(Ok((exit_status, stdout, stderr))) => {
             let output_files = detect_outputs(&req.run_dir, &before).await?;
+            let exit_code = exit_status.code().unwrap_or(-1);
+            let outputs_meta: Vec<(&str, u64)> = output_files
+                .iter()
+                .filter_map(|(n, p)| std::fs::metadata(p).ok().map(|m| (n.as_str(), m.len())))
+                .collect();
+            info!(
+                session_id = %sid,
+                status = ?RunStatus::Completed,
+                exit_code,
+                elapsed_secs = elapsed.as_secs_f64(),
+                stdout_bytes = stdout.len(),
+                stderr_bytes = stderr.len(),
+                output_file_count = output_files.len(),
+                output_files = ?outputs_meta,
+                "process finished (buffered)"
+            );
             Ok(BufferedResult {
                 status: RunStatus::Completed,
-                exit_code: exit_status.code().unwrap_or(-1),
+                exit_code,
                 stdout,
                 stderr,
                 elapsed,
                 output_files,
             })
         }
-        Ok(Err(e)) => Err(e),
+        Ok(Err(e)) => {
+            warn!(session_id = %sid, error = %e, "process wait/read failed (buffered)");
+            Err(e)
+        }
         Err(_) => {
-            kill_with_grace(&mut child).await;
+            kill_with_grace(&mut child, sid).await;
             let output_files = detect_outputs(&req.run_dir, &before).await?;
+            let outputs_meta: Vec<(&str, u64)> = output_files
+                .iter()
+                .filter_map(|(n, p)| std::fs::metadata(p).ok().map(|m| (n.as_str(), m.len())))
+                .collect();
+            warn!(
+                session_id = %sid,
+                status = ?RunStatus::TimedOut,
+                exit_code = -1,
+                elapsed_secs = elapsed.as_secs_f64(),
+                output_file_count = output_files.len(),
+                output_files = ?outputs_meta,
+                "process timed out (buffered)"
+            );
             Ok(BufferedResult {
                 status: RunStatus::TimedOut,
                 exit_code: -1,
@@ -166,6 +224,16 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
 
 /// Run a model, streaming stdout/stderr chunks over a channel. Used by Run and RunPipeline.
 pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> io::Result<()> {
+    let sid = req.session_id.as_str();
+    info!(
+        session_id = %sid,
+        executable = %req.executable.display(),
+        file_root = %req.file_root,
+        run_dir = %req.run_dir.display(),
+        timeout_secs = req.timeout.as_secs(),
+        "spawning process (streaming)"
+    );
+
     let before = snapshot_dir(&req.run_dir).await?;
     let start = Instant::now();
 
@@ -196,7 +264,7 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
                     break (RunStatus::Signaled, -1);
                 }
                 Err(_) => {
-                    kill_with_grace(&mut child).await;
+                    kill_with_grace(&mut child, sid).await;
                     break (RunStatus::TimedOut, -1);
                 }
             }
@@ -228,7 +296,7 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
                 }
             }
             _ = tokio::time::sleep_until(deadline) => {
-                kill_with_grace(&mut child).await;
+                kill_with_grace(&mut child, sid).await;
                 break (RunStatus::TimedOut, -1);
             }
         }
@@ -236,6 +304,21 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
 
     let elapsed = start.elapsed();
     let output_files = detect_outputs(&req.run_dir, &before).await?;
+
+    let outputs_meta: Vec<(&str, u64)> = output_files
+        .iter()
+        .filter_map(|(n, p)| std::fs::metadata(p).ok().map(|m| (n.as_str(), m.len())))
+        .collect();
+
+    info!(
+        session_id = %sid,
+        status = ?status,
+        exit_code,
+        elapsed_secs = elapsed.as_secs_f64(),
+        output_file_count = output_files.len(),
+        output_files = ?outputs_meta,
+        "process finished (streaming)"
+    );
 
     let file_infos: Vec<proto::FileInfo> = output_files
         .iter()
@@ -262,8 +345,8 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
     Ok(())
 }
 
-async fn kill_with_grace(child: &mut tokio::process::Child) {
-    debug!("sending SIGTERM");
+async fn kill_with_grace(child: &mut tokio::process::Child, session_id: &str) {
+    debug!(session_id = %session_id, "sending SIGTERM");
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         unsafe {
@@ -274,7 +357,10 @@ async fn kill_with_grace(child: &mut tokio::process::Child) {
     match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
         Ok(_) => {}
         Err(_) => {
-            warn!("process did not exit after SIGTERM, sending SIGKILL");
+            warn!(
+                session_id = %session_id,
+                "process did not exit after SIGTERM, sending SIGKILL"
+            );
             let _ = child.kill().await;
         }
     }
