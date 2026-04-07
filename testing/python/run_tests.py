@@ -3,9 +3,11 @@ distributes across runners, and reports results."""
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -261,18 +263,37 @@ def main():
         loads[runner] += timings.get(test["name"], 10.0)
 
     results = []
-    for runner, runner_tests in assignments.items():
-        print(f"\nRunner {runner}: {len(runner_tests)} tests")
+
+    print_lock = threading.Lock()
+
+    def runner_worker(runner: str, runner_tests: list[dict]) -> list[dict]:
+        local_results = []
+        with print_lock:
+            print(f"\nRunner {runner}: {len(runner_tests)} tests")
         for test in runner_tests:
-            print(f"  Running [{test['tier']}] {test['name']}...", end=" ", flush=True)
+            with print_lock:
+                print(
+                    f"  Running [{test['tier']}] {test['name']}...",
+                    end=" ",
+                    flush=True,
+                )
             if test["tier"] == 1:
                 r = run_tier1_test(runner, test)
             elif test["tier"] == 2:
                 r = run_tier2_test(runner, test)
             else:
                 r = run_tier3_test(runner, test)
-            print(f"{r['status']} ({r.get('elapsed', 0):.1f}s)")
-            results.append(r)
+            with print_lock:
+                print(f"{r['status']} ({r.get('elapsed', 0):.1f}s)")
+            local_results.append(r)
+        return local_results
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RUNNERS) or 1) as ex:
+        futures = []
+        for runner, runner_tests in assignments.items():
+            futures.append(ex.submit(runner_worker, runner, runner_tests))
+        for fut in concurrent.futures.as_completed(futures):
+            results.extend(fut.result())
 
     # Save timings
     new_timings = {}
@@ -298,7 +319,8 @@ def main():
         print("\nFailures:")
         for r in results:
             if r["status"] in ("fail", "error"):
-                print(f"  {r['name']}: {r['status']} - {r.get('error', f'exit_code={r.get('exit_code')}')}")
+                fallback = f"exit_code={r.get('exit_code')}"
+                print(f"  {r['name']}: {r['status']} - {r.get('error', fallback)}")
         sys.exit(1)
 
 

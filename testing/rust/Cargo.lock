@@ -44,6 +44,7 @@ name = "at-test-driver"
 version = "0.1.0"
 dependencies = [
  "at-runner-client",
+ "serde_json",
  "tokio",
 ]
 

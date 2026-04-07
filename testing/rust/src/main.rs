@@ -10,6 +10,7 @@ fn main() {
         .unwrap_or_else(|_| "localhost:50051".to_string())
         .split(',')
         .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .collect();
 
     let tests_dir = PathBuf::from(
@@ -27,23 +28,98 @@ fn main() {
         println!("  [{}] {}: {}", t.tier, t.name, t.models.join(", "));
     }
 
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    if runners.is_empty() {
+        eprintln!("RUNNERS is empty");
+        std::process::exit(2);
+    }
 
-    let mut results = Vec::new();
-    for (i, test) in tests.iter().enumerate() {
-        let runner = &runners[i % runners.len()];
-        print!("  Running [{}] {}...", test.tier, test.name);
+    // Greedy load balancing using prior timings (optional).
+    let timings_file =
+        std::env::var("TIMINGS_FILE").unwrap_or_else(|_| "/tmp/timings.json".to_string());
+    let timings: HashMap<String, f64> = fs::read_to_string(&timings_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
 
-        let start = Instant::now();
-        let status = match test.tier {
-            1 => run_tier1(runner, test),
-            2 => rt.block_on(run_tier2(runner, test)),
-            3 => rt.block_on(run_tier3(runner, test)),
-            _ => "skip".to_string(),
-        };
-        let elapsed = start.elapsed().as_secs_f64();
-        println!(" {} ({:.1}s)", status, elapsed);
-        results.push((test.name.clone(), test.tier, status, elapsed));
+    let mut assignments: HashMap<String, Vec<TestCase>> = runners
+        .iter()
+        .map(|r| (r.clone(), Vec::new()))
+        .collect();
+    let mut loads: HashMap<String, f64> = runners.iter().map(|r| (r.clone(), 0.0)).collect();
+
+    let mut tests_sorted = tests;
+    tests_sorted.sort_by(|a, b| {
+        let ta = timings.get(&a.name).copied().unwrap_or(0.0);
+        let tb = timings.get(&b.name).copied().unwrap_or(0.0);
+        tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for test in tests_sorted {
+        let runner = loads
+            .iter()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(r, _)| r.clone())
+            .unwrap();
+        loads
+            .entry(runner.clone())
+            .and_modify(|l| *l += timings.get(&test.name).copied().unwrap_or(10.0));
+        assignments.entry(runner).or_default().push(test);
+    }
+
+    let print_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let results_lock: std::sync::Arc<std::sync::Mutex<Vec<(String, u8, String, f64)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    std::thread::scope(|scope| {
+        for (runner, runner_tests) in assignments {
+            let print_lock = std::sync::Arc::clone(&print_lock);
+            let results_lock = std::sync::Arc::clone(&results_lock);
+
+            scope.spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                {
+                    let _g = print_lock.lock().unwrap();
+                    println!("\nRunner {}: {} tests", runner, runner_tests.len());
+                }
+
+                for test in runner_tests {
+                    {
+                        let _g = print_lock.lock().unwrap();
+                        print!("  Running [{}] {}...", test.tier, test.name);
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
+
+                    let start = Instant::now();
+                    let status = match test.tier {
+                        1 => run_tier1(&runner, &test),
+                        2 => rt.block_on(run_tier2(&runner, &test)),
+                        3 => rt.block_on(run_tier3(&runner, &test)),
+                        _ => "skip".to_string(),
+                    };
+                    let elapsed = start.elapsed().as_secs_f64();
+
+                    {
+                        let _g = print_lock.lock().unwrap();
+                        println!(" {} ({:.1}s)", status, elapsed);
+                    }
+                    results_lock
+                        .lock()
+                        .unwrap()
+                        .push((test.name.clone(), test.tier, status, elapsed));
+                }
+            });
+        }
+    });
+
+    let results = results_lock.lock().unwrap();
+
+    // Persist timings for the next run (best effort).
+    let mut new_timings: HashMap<String, f64> = HashMap::new();
+    for (name, _tier, _status, elapsed) in results.iter() {
+        new_timings.insert(name.clone(), *elapsed);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&new_timings) {
+        let _ = fs::write(&timings_file, s);
     }
 
     let passed = results.iter().filter(|r| r.2 == "pass").count();
