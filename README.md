@@ -95,6 +95,8 @@ To run just the **sweep** against the compose runner pool:
 ./scripts/test-sweep-compose.sh
 ```
 
+The script runs the sweep in a one-off container (`docker compose run --rm … sweep-driver`) so the sweep-driver container is removed when the sweep exits, and it runs `docker compose down` when the sweep finishes or is interrupted so runner containers and the project network are stopped and removed.
+
 If you see widespread `SIGILL` / “Illegal instruction” failures from AT executables on older CPUs, run the compose sweep with a locally-built, portable AT binaries image:
 
 ```bash

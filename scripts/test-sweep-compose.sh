@@ -37,5 +37,12 @@ echo "==> Shutting down any existing compose pool"
 cd "$REPO/testing"
 docker compose down >/dev/null 2>&1 || true
 
-echo "==> Starting runner pool + running sweep driver"
-docker compose up --build --abort-on-container-exit sweep-driver
+cleanup_pool() {
+  echo "==> Shutting down runner pool"
+  docker compose down 2>/dev/null || true
+}
+trap cleanup_pool EXIT INT TERM
+
+echo "==> Starting runner pool + running sweep driver (one-off container, removed on exit)"
+# --rm removes the sweep-driver container when it finishes; -T avoids allocating a TTY (scripts/CI).
+docker compose run --rm --build -T sweep-driver
