@@ -16,6 +16,10 @@ dev = ["commitizen>=3.13"]
 [tool.setuptools]
 py-modules = ["workspace"]
 
+# Keep editable-install metadata out of the repo root (setuptools still names it *.egg-info).
+[tool.distutils.egg_info]
+egg_base = ".egg-base"
+
 [tool.commitizen]
 name = "cz_conventional_commits"
 version = "0.1.0"
