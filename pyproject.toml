@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "at-runner-workspace"
+version = "0.1.0"
+description = "Workspace metadata for tooling (Commitizen). Not published to PyPI."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["commitizen>=3.13"]
+
+[tool.setuptools]
+py-modules = ["workspace"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+tag_format = "v$version"
+changelog_file = "CHANGELOG.md"
+update_changelog_on_bump = true
+version_files = [
+    "service/Cargo.toml:^version",
+    "client/python/pyproject.toml:^version",
+    "client/rust/Cargo.toml:^version",
+    "pyproject.toml:^version",
+]

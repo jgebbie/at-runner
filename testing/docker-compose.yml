@@ -1,0 +1,33 @@
+services:
+  runner-1:
+    image: at-runner
+    tmpfs:
+      - /workspace:rw,noexec,nosuid,size=512m
+
+  runner-2:
+    image: at-runner
+    tmpfs:
+      - /workspace:rw,noexec,nosuid,size=512m
+
+  runner-3:
+    image: at-runner
+    tmpfs:
+      - /workspace:rw,noexec,nosuid,size=512m
+
+  # Fortran test cases: clone https://github.com/jgebbie/at to ../external/at
+  # (./scripts/fetch-at-tests.sh) or set AT_TESTS_COMPOSE_MOUNT to an absolute path.
+  test-driver-python:
+    build: ./python
+    depends_on: [runner-1, runner-2, runner-3]
+    volumes:
+      - ${AT_TESTS_COMPOSE_MOUNT:-../external/at/tests}:/tests:ro
+    environment:
+      RUNNERS: "runner-1:50051,runner-2:50051,runner-3:50051"
+
+  test-driver-rust:
+    build: ./rust
+    depends_on: [runner-1, runner-2, runner-3]
+    volumes:
+      - ${AT_TESTS_COMPOSE_MOUNT:-../external/at/tests}:/tests:ro
+    environment:
+      RUNNERS: "runner-1:50051,runner-2:50051,runner-3:50051"

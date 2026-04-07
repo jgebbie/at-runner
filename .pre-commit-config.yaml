@@ -1,0 +1,28 @@
+# Git hooks run with [prek](https://github.com/j178/prek) (drop-in for pre-commit).
+# Install: https://github.com/j178/prek — then `prek install` from the repo root.
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt-service
+        name: cargo fmt (service)
+        entry: bash -c 'cd "$(git rev-parse --show-toplevel)/service" && cargo fmt --all -- --check'
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: cargo-fmt-client-rust
+        name: cargo fmt (client/rust)
+        entry: bash -c 'cd "$(git rev-parse --show-toplevel)/client/rust" && cargo fmt --all -- --check'
+        language: system
+        pass_filenames: false
+        always_run: true

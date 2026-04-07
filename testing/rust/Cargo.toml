@@ -1,0 +1,12 @@
+[package]
+name = "at-test-driver"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "at-test-driver"
+path = "src/main.rs"
+
+[dependencies]
+at-runner-client = { path = "../../client/rust" }
+tokio = { version = "1", features = ["full"] }

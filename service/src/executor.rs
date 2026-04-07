@@ -1,0 +1,281 @@
+use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
+
+use crate::proto::{self, OutputChunk, RunCompleted, RunStatus};
+
+pub struct ExecRequest {
+    pub executable: PathBuf,
+    pub file_root: String,
+    pub run_dir: PathBuf,
+    pub timeout: Duration,
+}
+
+pub struct BufferedResult {
+    pub status: RunStatus,
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub elapsed: Duration,
+    pub output_files: Vec<(String, PathBuf)>,
+}
+
+pub enum StreamEvent {
+    Output(OutputChunk),
+    Completed(RunCompleted, Vec<(String, PathBuf)>),
+}
+
+/// Populate `run_dir` with workspace files and inline inputs.
+/// If `use_symlinks` is true, workspace files are symlinked (for Tier 2 Run
+/// which executes in-place in the workspace — this parameter is unused there).
+/// If false, workspace files are copied so the workspace is never modified
+/// by the subprocess (required for RunSync temp dirs and pipeline steps).
+pub async fn populate_run_dir(
+    run_dir: &Path,
+    workspace: &Path,
+    inputs: &[(String, Vec<u8>)],
+) -> io::Result<()> {
+    let mut entries = tokio::fs::read_dir(workspace).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let fname = entry.file_name();
+        let dest = run_dir.join(&fname);
+        if !dest.exists() {
+            tokio::fs::copy(entry.path(), &dest).await?;
+        }
+    }
+
+    for (name, data) in inputs {
+        let dest = run_dir.join(name);
+        tokio::fs::write(&dest, data).await?;
+    }
+
+    Ok(())
+}
+
+/// Snapshot directory: capture filename -> modification time.
+pub async fn snapshot_dir(dir: &Path) -> io::Result<HashMap<String, SystemTime>> {
+    let mut map = HashMap::new();
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if let Some(name) = entry.file_name().to_str() {
+            if let Ok(meta) = entry.metadata().await {
+                if let Ok(mtime) = meta.modified() {
+                    map.insert(name.to_string(), mtime);
+                }
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Detect output files: new files or files whose mtime changed since the snapshot.
+pub async fn detect_outputs(
+    dir: &Path,
+    before: &HashMap<String, SystemTime>,
+) -> io::Result<Vec<(String, PathBuf)>> {
+    let mut outputs = Vec::new();
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let meta = entry.metadata().await?;
+        if !meta.is_file() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            let is_output = match (before.get(name), meta.modified()) {
+                (None, _) => true,
+                (Some(old_mtime), Ok(new_mtime)) => new_mtime > *old_mtime,
+                _ => false,
+            };
+            if is_output {
+                outputs.push((name.to_string(), entry.path()));
+            }
+        }
+    }
+    outputs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(outputs)
+}
+
+/// Run a model, buffering all stdout/stderr. Used by RunSync.
+pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
+    let before = snapshot_dir(&req.run_dir).await?;
+    let start = Instant::now();
+
+    let mut child = Command::new(&req.executable)
+        .arg(&req.file_root)
+        .current_dir(&req.run_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let mut stdout_handle = child.stdout.take().unwrap();
+    let mut stderr_handle = child.stderr.take().unwrap();
+
+    let stdout_fut = async {
+        let mut buf = Vec::new();
+        stdout_handle.read_to_end(&mut buf).await.ok();
+        buf
+    };
+    let stderr_fut = async {
+        let mut buf = Vec::new();
+        stderr_handle.read_to_end(&mut buf).await.ok();
+        buf
+    };
+
+    let timeout_result = tokio::time::timeout(req.timeout, async {
+        let (stdout, stderr) = tokio::join!(stdout_fut, stderr_fut);
+        let status = child.wait().await?;
+        Ok::<_, io::Error>((status, stdout, stderr))
+    })
+    .await;
+
+    let elapsed = start.elapsed();
+
+    match timeout_result {
+        Ok(Ok((exit_status, stdout, stderr))) => {
+            let output_files = detect_outputs(&req.run_dir, &before).await?;
+            Ok(BufferedResult {
+                status: RunStatus::Completed,
+                exit_code: exit_status.code().unwrap_or(-1),
+                stdout,
+                stderr,
+                elapsed,
+                output_files,
+            })
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            kill_with_grace(&mut child).await;
+            let output_files = detect_outputs(&req.run_dir, &before).await?;
+            Ok(BufferedResult {
+                status: RunStatus::TimedOut,
+                exit_code: -1,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                elapsed,
+                output_files,
+            })
+        }
+    }
+}
+
+/// Run a model, streaming stdout/stderr chunks over a channel. Used by Run and RunPipeline.
+pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> io::Result<()> {
+    let before = snapshot_dir(&req.run_dir).await?;
+    let start = Instant::now();
+
+    let mut child = Command::new(&req.executable)
+        .arg(&req.file_root)
+        .current_dir(&req.run_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+
+    let mut stdout_buf = vec![0u8; 8192];
+    let mut stderr_buf = vec![0u8; 8192];
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    let deadline = tokio::time::Instant::now() + req.timeout;
+
+    let (status, exit_code) = loop {
+        if stdout_done && stderr_done {
+            match tokio::time::timeout_at(deadline, child.wait()).await {
+                Ok(Ok(exit)) => {
+                    break (RunStatus::Completed, exit.code().unwrap_or(-1));
+                }
+                Ok(Err(_)) => {
+                    break (RunStatus::Signaled, -1);
+                }
+                Err(_) => {
+                    kill_with_grace(&mut child).await;
+                    break (RunStatus::TimedOut, -1);
+                }
+            }
+        }
+
+        tokio::select! {
+            res = stdout.read(&mut stdout_buf), if !stdout_done => {
+                match res {
+                    Ok(0) => stdout_done = true,
+                    Ok(n) => {
+                        let _ = tx.send(StreamEvent::Output(OutputChunk {
+                            stream: proto::OutputStream::Stdout.into(),
+                            data: stdout_buf[..n].to_vec(),
+                        })).await;
+                    }
+                    Err(_) => stdout_done = true,
+                }
+            }
+            res = stderr.read(&mut stderr_buf), if !stderr_done => {
+                match res {
+                    Ok(0) => stderr_done = true,
+                    Ok(n) => {
+                        let _ = tx.send(StreamEvent::Output(OutputChunk {
+                            stream: proto::OutputStream::Stderr.into(),
+                            data: stderr_buf[..n].to_vec(),
+                        })).await;
+                    }
+                    Err(_) => stderr_done = true,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                kill_with_grace(&mut child).await;
+                break (RunStatus::TimedOut, -1);
+            }
+        }
+    };
+
+    let elapsed = start.elapsed();
+    let output_files = detect_outputs(&req.run_dir, &before).await?;
+
+    let file_infos: Vec<proto::FileInfo> = output_files
+        .iter()
+        .filter_map(|(name, path)| {
+            std::fs::metadata(path).ok().map(|m| proto::FileInfo {
+                name: name.clone(),
+                size_bytes: m.len(),
+            })
+        })
+        .collect();
+
+    let _ = tx
+        .send(StreamEvent::Completed(
+            RunCompleted {
+                status: status.into(),
+                exit_code,
+                elapsed_seconds: elapsed.as_secs_f64(),
+                output_files: file_infos,
+            },
+            output_files,
+        ))
+        .await;
+
+    Ok(())
+}
+
+async fn kill_with_grace(child: &mut tokio::process::Child) {
+    debug!("sending SIGTERM");
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            warn!("process did not exit after SIGTERM, sending SIGKILL");
+            let _ = child.kill().await;
+        }
+    }
+}

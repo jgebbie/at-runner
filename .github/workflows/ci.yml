@@ -1,0 +1,93 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prek:
+    name: Prek (hooks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: j178/prek-action@v2
+
+  rust:
+    name: Rust service (clippy, build, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: cargo build
+        run: cargo build --release
+
+      - name: cargo test
+        run: cargo test
+
+  rust-client:
+    name: Rust client (clippy, build, test compile)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: cargo build
+        run: cargo build
+
+      - name: cargo test --no-run
+        run: cargo test --no-run
+
+  python-client:
+    name: Python client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package (editable)
+        run: pip install -e './client/python[dev]'
+
+      - name: Byte-compile sources
+        run: python -m compileall -q client/python/src

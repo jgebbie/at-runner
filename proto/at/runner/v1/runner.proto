@@ -1,0 +1,177 @@
+syntax = "proto3";
+package at.runner.v1;
+
+service Runner {
+  // --- Tier 1: Simple (unary, self-contained) ---
+  rpc RunSync(RunSyncRequest) returns (RunSyncResponse);
+
+  // --- Tier 2: Interactive (streaming, session workspace) ---
+  rpc UploadFile(stream FileChunk) returns (UploadResponse);
+  rpc GetFile(GetFileRequest) returns (stream FileChunk);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc Run(RunRequest) returns (stream RunOutput);
+
+  // --- Tier 3: Orchestration (DAG of runs, parallel execution) ---
+  rpc RunPipeline(RunPipelineRequest) returns (stream PipelineOutput);
+}
+
+// ============================================================
+// Shared types
+// ============================================================
+
+message File {
+  string name = 1;
+  bytes content = 2;
+}
+
+message FileChunk {
+  string name = 1;
+  bytes data = 2;
+}
+
+message FileInfo {
+  string name = 1;
+  uint64 size_bytes = 2;
+}
+
+enum OutputStream {
+  OUTPUT_STREAM_UNSPECIFIED = 0;
+  OUTPUT_STREAM_STDOUT = 1;
+  OUTPUT_STREAM_STDERR = 2;
+}
+
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_COMPLETED = 1;
+  RUN_STATUS_TIMED_OUT = 2;
+  RUN_STATUS_SIGNALED = 3;
+  RUN_STATUS_SKIPPED = 4;
+}
+
+message OutputChunk {
+  OutputStream stream = 1;
+  bytes data = 2;
+}
+
+message RunStarted {
+  string model = 1;
+  string file_root = 2;
+}
+
+message RunCompleted {
+  RunStatus status = 1;
+  int32 exit_code = 2;
+  double elapsed_seconds = 3;
+  repeated FileInfo output_files = 4;
+}
+
+// ============================================================
+// Tier 1: RunSync
+// ============================================================
+
+message RunSyncRequest {
+  string model = 1;
+  string file_root = 2;
+  repeated File inputs = 3;
+  optional uint32 timeout_seconds = 4;
+}
+
+message RunSyncResponse {
+  RunStatus status = 1;
+  int32 exit_code = 2;
+  bytes stdout = 3;
+  bytes stderr = 4;
+  double elapsed_seconds = 5;
+  repeated File outputs = 6;
+}
+
+// ============================================================
+// Tier 2: Workspace management
+// ============================================================
+
+message UploadResponse {
+  string name = 1;
+  uint64 size_bytes = 2;
+}
+
+message GetFileRequest {
+  string name = 1;
+}
+
+message DeleteFileRequest {
+  string name = 1;
+}
+
+message DeleteFileResponse {}
+
+message ListFilesRequest {}
+
+message ListFilesResponse {
+  repeated FileInfo files = 1;
+}
+
+// ============================================================
+// Tier 2: Run — streaming execution in the workspace
+// ============================================================
+
+message RunRequest {
+  string model = 1;
+  string file_root = 2;
+  optional uint32 timeout_seconds = 3;
+}
+
+message RunOutput {
+  oneof payload {
+    RunStarted started = 1;
+    OutputChunk output = 2;
+    RunCompleted completed = 3;
+    FileChunk file = 4;
+  }
+}
+
+// ============================================================
+// Tier 3: RunPipeline
+// ============================================================
+
+message RunPipelineRequest {
+  repeated PipelineStep steps = 1;
+  optional uint32 timeout_seconds = 2;
+}
+
+message PipelineStep {
+  string id = 1;
+  string model = 2;
+  string file_root = 3;
+  repeated File inputs = 4;
+  repeated string depends_on = 5;
+  optional uint32 timeout_seconds = 6;
+}
+
+message PipelineOutput {
+  oneof payload {
+    PipelineStarted pipeline_started = 1;
+    StepEvent step = 2;
+    PipelineCompleted pipeline_completed = 3;
+  }
+}
+
+message PipelineStarted {
+  repeated string step_ids = 1;
+}
+
+message StepEvent {
+  string step_id = 1;
+  oneof detail {
+    RunStarted started = 2;
+    OutputChunk output = 3;
+    RunCompleted completed = 4;
+    FileChunk file = 5;
+  }
+}
+
+message PipelineCompleted {
+  bool all_succeeded = 1;
+  double elapsed_seconds = 2;
+  repeated string skipped_steps = 3;
+}

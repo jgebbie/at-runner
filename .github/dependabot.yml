@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /service
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /client/rust
+    schedule:
+      interval: weekly

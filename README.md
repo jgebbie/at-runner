@@ -1,0 +1,98 @@
+# AT Runner
+
+**AT Runner** is a gRPC service that wraps the [Acoustics Toolbox (AT)](https://oalib-acoustics.org/) — Fortran programs such as BELLHOP, KRAKEN, SCOOTER, and SPARC used for underwater acoustic modeling. Clients send input files, run models over the network, and retrieve outputs without managing Fortran builds on their machines.
+
+This repository holds the **runner only** (Rust server, Protocol Buffers, and client libraries). The Fortran sources and canonical regression tests live in the AT repository (e.g. [github.com/jgebbie/at](https://github.com/jgebbie/at)). The integration boundary is intentional: ship AT as prebuilt binaries (OCI image or a local `bin/` directory), pin a version for reproducible images, and avoid vendoring the full Fortran tree here long term.
+
+For **API design, session model, supported executables, streaming behavior, and client patterns**, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+## Layout
+
+```
+├── proto/              # at.runner.v1 — shared by server and clients
+├── service/            # Rust gRPC server (at-runner binary)
+├── client/
+│   ├── python/         # at_runner package
+│   └── rust/           # Rust client crate
+├── scripts/            # Server helpers, smoke/integration/sweep tests
+├── testing/            # Docker Compose + Python/Rust test drivers
+├── external/           # (optional, gitignored) AT clone from fetch-at-tests.sh → external/at/
+└── Dockerfile          # Multi-stage: AT binaries + Rust build → runtime image
+```
+
+Fortran **test fixtures** are not committed here. Use `./scripts/fetch-at-tests.sh` to clone AT into `external/at/` (under `external/`, gitignored), or set `AT_TESTS_ROOT` to any checkout’s `tests/` directory.
+
+## Requirements
+
+- **Rust** (edition in `service/Cargo.toml`) and **protobuf compiler** (`protoc`) to build the server from source.
+- **Docker** (optional) for the full image and scripted tests.
+- **Python 3.12+** for the client and shell test scripts, for example:
+  `python3 -m venv client/python/.venv && . client/python/.venv/bin/activate && pip install -e './client/python[dev]'`
+  (run from the repository root; `[dev]` pulls in pytest and codegen tools).
+- **[prek](https://github.com/j178/prek)** (Rust; compatible with `.pre-commit-config.yaml`) for git hooks — install the binary, then run `prek install` at the repo root. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Build and run
+
+### Docker (recommended)
+
+The [Dockerfile](Dockerfile) pulls prebuilt AT binaries from **`ghcr.io/jgebbie/at:latest`** (first stage) and compiles the Rust service. To use another AT image, change the `FROM ... AS at-binaries` line and pin a tag or digest. Then:
+
+```bash
+docker build -t at-runner .
+docker run -p 50051:50051 \
+  --tmpfs /workspace:rw,noexec,nosuid,size=512m \
+  at-runner
+```
+
+Helper: `./scripts/server-start.sh --docker` and `./scripts/server-stop.sh`.
+
+### Local Rust binary
+
+```bash
+cd service
+cargo build --release
+# Run against AT executables on disk (same layout as make install → bin/)
+./target/release/at-runner --bin-dir /path/to/at/bin --workspace /tmp/at-ws --port 50051
+```
+
+The non-Docker `./scripts/server-start.sh` path expects **`bin/`** at the repository root (populate it from an AT `make install` or symlink).
+
+## Tests
+
+Integration tests use real case files from the AT repo’s `tests/` tree.
+
+```bash
+./scripts/fetch-at-tests.sh          # once: clones github.com/jgebbie/at → external/at/
+./scripts/test-smoke.sh              # quick three-tier API check (needs running server)
+./scripts/test-integration.sh        # pytest (needs running server + venv)
+./scripts/test-sweep.sh              # broad RunSync sweep (needs running server + venv)
+```
+
+Set **`AT_RUNNER_TARGET`** (default `localhost:50051`) if the server is not local.
+
+**Compose harness** (multiple runners + drivers): build the **`at-runner`** image once from the repository root (`docker build -t at-runner .` — same tag the Compose file expects), then after `fetch-at-tests.sh` (or set `AT_TESTS_COMPOSE_MOUNT` to your `tests/` path), from `testing/`:
+
+```bash
+docker compose -f docker-compose.yml up --abort-on-container-exit
+```
+
+## Conventions (summary)
+
+- **File payloads** on the wire are raw **bytes** (Fortran emits binary `.mod`, `.shd`, etc.).
+- Every model takes a **file root** as its first CLI argument; filenames are that root plus extensions (e.g. `MunkK.env`).
+- **One container ≈ one session**: workspace under `/workspace` (use tmpfs in production); `Run` / `RunPipeline` are serialized against the workspace; stateless `RunSync` can run concurrently.
+
+Details: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the code of conduct, [Conventional Commits](https://www.conventionalcommits.org/), [Commitizen](https://commitizen-tools.github.io/commitizen/) versioning (`cz bump`, `CHANGELOG.md`), and what runs in GitHub Actions.
+
+## Related repositories
+
+| Repository | Role |
+|------------|------|
+| AT (Fortran) | Sources, `make install` → `bin/`, `tests/` regression cases |
+| AT Runner (this repo) | gRPC service, proto, clients, integration Dockerfile |
+
+Typical linking options: **prebuilt AT base image** (as in this Dockerfile), **git submodule**, or **BuildKit additional context** pointing at an AT checkout — pick one and pin a tag or digest for reproducible builds.
