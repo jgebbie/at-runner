@@ -81,6 +81,7 @@ docker compose -f docker-compose.yml up --abort-on-container-exit
 - **File payloads** on the wire are raw **bytes** (Fortran emits binary `.mod`, `.shd`, etc.).
 - Every model takes a **file root** as its first CLI argument; filenames are that root plus extensions (e.g. `MunkK.env`).
 - **One container ≈ one session**: workspace under `/workspace` (use tmpfs in production); `Run` / `RunPipeline` are serialized against the workspace; stateless `RunSync` can run concurrently.
+- **Server logs**: `RUST_LOG` controls verbosity; each RPC gets a `session_id` in log output for correlation (see **Logging** in [ARCHITECTURE.md](ARCHITECTURE.md)).
 
 Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 

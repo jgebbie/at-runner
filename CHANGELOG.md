@@ -8,5 +8,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Structured server logging with per-RPC `session_id` (UUID), execution status, exit codes, and file transfer details; configurable via `RUST_LOG` (see ARCHITECTURE.md **Logging**).
 - Contribution guidelines, Commitizen configuration, and GitHub Actions CI.
 - Prek (`.pre-commit-config.yaml`), Dependabot for GitHub Actions and Cargo, `SECURITY.md`, and expanded CI (prek, Rust client build / test compile, `cargo test` for the service).

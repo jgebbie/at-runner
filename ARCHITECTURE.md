@@ -103,7 +103,9 @@ The `.arr` extension is dual-mode (text or binary depending on Bellhop options).
 
 ## Session Model
 
-Each container runs a single at-runner instance and serves one client session. The container IS the session — no session IDs, no multiplexing.
+Each container runs a single at-runner instance and serves one client session. The container IS the session — there is **no multiplexing** of workspaces and **no session identifier in the gRPC API** (clients do not pass or receive a session ID).
+
+For **operations and debugging**, the server assigns a **per-RPC correlation ID** (UUID) to log lines: field `session_id` in structured [`tracing`](https://docs.rs/tracing) output. That ID is only for log correlation; it is unrelated to the workspace session above. Pipeline steps additionally log subprocess scope as `{pipeline_session_id}:step:{step_id}`.
 
 A **persistent workspace directory** (`/workspace`, tmpfs-backed) holds session state:
 - Files uploaded by the client persist across runs.
@@ -691,6 +693,12 @@ The server implements the standard gRPC health checking protocol (`grpc.health.v
 - **Clients**: connection verification before submitting work.
 
 The health status is `SERVING` once the server has started and the executable allowlist has been built. It transitions to `NOT_SERVING` during graceful shutdown.
+
+## Logging
+
+The binary uses **`tracing`** with a default filter of `at_runner=info,tonic=info`. Override with the standard **`RUST_LOG`** environment variable (for example `RUST_LOG=at_runner=debug` for more detail).
+
+Logs are **structured**: each RPC (`RunSync`, `Run`, workspace calls, `RunPipeline`) emits a `session_id` (UUID) so you can correlate lines for a single request. Execution logs include model name, `file_root`, timeouts, **exit codes**, **run status** (`RunStatus`), stdout/stderr sizes (buffered path), and **output file names with sizes**; streaming paths also log chunks sent per file. This is server-side observability only — nothing is added to protobuf messages.
 
 ## Future Improvements
 
