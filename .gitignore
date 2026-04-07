@@ -33,3 +33,7 @@ Thumbs.db
 
 # Local clone of Acoustics Toolbox (Fortran tests); see scripts/fetch-at-tests.sh
 external/at/
+
+# Local server runtime files
+.server.pid
+.server.log

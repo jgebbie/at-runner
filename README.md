@@ -33,18 +33,24 @@ Fortran **test fixtures** are not committed here. Use `./scripts/fetch-at-tests.
 
 ## Build and run
 
-### Docker (recommended)
+### Docker (default / recommended)
 
-The [Dockerfile](Dockerfile) pulls prebuilt AT binaries from **`ghcr.io/jgebbie/at:latest`** (first stage) and compiles the Rust service. To use another AT image, change the `FROM ... AS at-binaries` line and pin a tag or digest. Then:
+The [Dockerfile](Dockerfile) pulls prebuilt AT binaries from **`ghcr.io/jgebbie/at:latest`** (first stage) and compiles the Rust service. To use another AT image (pin a tag or digest), pass `AT_IMAGE` at build time.
 
 ```bash
-docker build -t at-runner .
+docker build --build-arg AT_IMAGE=ghcr.io/jgebbie/at:latest -t at-runner .
 docker run -p 50051:50051 \
   --tmpfs /workspace:rw,noexec,nosuid,size=512m \
   at-runner
 ```
 
-Helper: `./scripts/server-start.sh --docker` and `./scripts/server-stop.sh`.
+Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`.
+
+To start with a specific AT image via the helper:
+
+```bash
+AT_IMAGE=ghcr.io/jgebbie/at:latest ./scripts/server-start.sh
+```
 
 ### Local Rust binary
 
@@ -55,7 +61,7 @@ cargo build --release
 ./target/release/at-runner --bin-dir /path/to/at/bin --workspace /tmp/at-ws --port 50051
 ```
 
-The non-Docker `./scripts/server-start.sh` path expects **`bin/`** at the repository root (populate it from an AT `make install` or symlink).
+The local `./scripts/server-start.sh --local` path expects **`bin/`** at the repository root (populate it from an AT `make install` or symlink).
 
 ## Tests
 

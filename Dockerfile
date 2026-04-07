@@ -1,5 +1,6 @@
-# Retrieve pre-compiled binaries from the AT repository registry
-FROM ghcr.io/jgebbie/at:latest AS at-binaries
+# Retrieve pre-compiled binaries from the AT repository registry (or a locally-built image).
+ARG AT_IMAGE=ghcr.io/jgebbie/at:latest
+FROM ${AT_IMAGE} AS at-binaries
 
 # Stage 2: Build Rust gRPC service
 FROM rust:bookworm AS rust-builder

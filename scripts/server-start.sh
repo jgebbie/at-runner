@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Start the at-runner gRPC server locally (background, with PID file).
-# Usage: ./scripts/server-start.sh [--docker]
+# Start the at-runner gRPC server (default: Docker).
+# Usage:
+#   ./scripts/server-start.sh            # Docker (default)
+#   ./scripts/server-start.sh --docker   # Docker (explicit)
+#   ./scripts/server-start.sh --local    # local Rust binary (needs ./bin)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PIDFILE="$REPO/.server.pid"
 PORT="${AT_RUNNER_PORT:-50051}"
 
-if [[ "${1:-}" == "--docker" ]]; then
+MODE="${1:-}"
+if [[ -z "$MODE" || "$MODE" == "--docker" ]]; then
     echo "==> Starting at-runner via Docker on port $PORT"
+    AT_IMAGE="${AT_IMAGE:-ghcr.io/jgebbie/at:latest}"
     # Build if image doesn't exist
     if ! docker image inspect at-runner >/dev/null 2>&1; then
         echo "    Building Docker image (first time takes ~1 min)..."
-        docker build -t at-runner "$REPO"
+        docker build --build-arg "AT_IMAGE=$AT_IMAGE" -t at-runner "$REPO"
     fi
     # Stop any existing container
     docker rm -f at-runner-dev 2>/dev/null || true
@@ -24,6 +29,12 @@ if [[ "${1:-}" == "--docker" ]]; then
     echo "==> Container at-runner-dev running on port $PORT"
     echo "    Stop with: ./scripts/server-stop.sh"
     exit 0
+fi
+
+if [[ "$MODE" != "--local" ]]; then
+    echo "Unknown option: ${MODE}"
+    echo "Usage: ./scripts/server-start.sh [--docker|--local]"
+    exit 2
 fi
 
 # --- Local mode ---
