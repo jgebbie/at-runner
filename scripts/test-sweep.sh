@@ -1,29 +1,40 @@
 #!/usr/bin/env bash
 # Sweep RunSync across every test case in tests/.
 # Parses runtests.m to find the correct model and file root for each case.
-# Usage: ./scripts/test-sweep.sh [target]
+# Usage:
+#   ./scripts/test-sweep.sh [target]
+#   RUNNERS="runner-1:50051,runner-2:50051" ./scripts/test-sweep.sh
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-${AT_RUNNER_TARGET:-localhost:50051}}"
+RUNNERS="${RUNNERS:-}"
 VENV="$REPO/client/python/.venv"
 
 # shellcheck source=ensure-at-tests.sh
 source "$REPO/scripts/ensure-at-tests.sh"
 
-source "$VENV/bin/activate"
+if [[ -f "$VENV/bin/activate" ]]; then
+  source "$VENV/bin/activate"
+fi
 
-echo "==> Sweep test against $TARGET"
+if [[ -n "$RUNNERS" ]]; then
+  echo "==> Sweep test against runner pool: $RUNNERS"
+else
+  echo "==> Sweep test against $TARGET"
+fi
 echo "    Test data: $AT_TESTS_ROOT"
 echo "    Scanning $(ls -d "$AT_TESTS_ROOT"/*/ 2>/dev/null | wc -l) test directories"
 echo
 
-PYTHONUNBUFFERED=1 PYTHONPATH="$REPO/client/python/src" python3 - "$TARGET" "$REPO" <<'PYEOF'
+PYTHONUNBUFFERED=1 PYTHONPATH="$REPO/client/python/src" python3 - "$TARGET" "$REPO" "$RUNNERS" <<'PYEOF'
 import os, re, sys, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 target = sys.argv[1]
 repo   = Path(sys.argv[2])
+runner_list = sys.argv[3]
 tests  = Path(os.environ["AT_TESTS_ROOT"])
 
 sys.path.insert(0, str(repo / "client/python/src"))
@@ -92,6 +103,12 @@ def collect_inputs(test_dir):
 passed = failed = skipped = errors = 0
 results = []
 
+def _get_runners():
+    env = (os.environ.get("RUNNERS") or "").strip()
+    raw = env or (runner_list or "")
+    runners = [r.strip() for r in raw.split(",") if r.strip()]
+    return runners
+
 def find_test_dirs(root):
     """Yield (display_name, dir_path) for each testable directory."""
     for d in sorted(root.iterdir()):
@@ -125,38 +142,74 @@ for display_name, d in find_test_dirs(tests):
         if env_name not in inputs:
             continue
 
-        t0 = time.time()
-        try:
-            r = run_sync(target, model=model, file_root=root,
-                         inputs=inputs, timeout=120)
-            dt = time.time() - t0
-            ok = r.exit_code == 0
-            tag = "\033[32mPASS\033[0m" if ok else "\033[33mFAIL\033[0m"
-            if ok:
-                passed += 1
-            else:
-                failed += 1
-            out_names = ", ".join(sorted(r.files.keys()))
-            print(f"  {tag}  {display_name:25s}  {model:10s}  {root:25s}  "
-                  f"exit={r.exit_code:3d}  {dt:5.2f}s  [{out_names}]")
-            results.append((display_name, model, root, r.exit_code, dt))
-        except Exception as e:
-            dt = time.time() - t0
-            err_msg = str(e)
-            if "too large" in err_msg or "OUT_OF_RANGE" in err_msg:
-                import re as _re
-                m = _re.search(r"(\d{6,}) bytes", err_msg)
-                size_mb = int(m.group(1)) / 1e6 if m else 0
-                print(f"  \033[36mSKIP\033[0m  {display_name:25s}  {model:10s}  "
-                      f"{root:25s}  {dt:5.2f}s  "
-                      f"output too large for RunSync ({size_mb:.0f} MB)")
-                skipped += 1
-            else:
-                err_str = err_msg.split("\n")[0][:80]
-                print(f"  \033[31mERR \033[0m  {display_name:25s}  {model:10s}  "
-                      f"{root:25s}  {dt:5.2f}s  {err_str}")
-                errors += 1
-            results.append((display_name, model, root, -1, dt))
+        results.append((display_name, model, root, inputs))
+
+def run_one(runner, display_name, model, root, inputs):
+    t0 = time.time()
+    try:
+        r = run_sync(runner, model=model, file_root=root, inputs=inputs, timeout=120)
+        dt = time.time() - t0
+        stderr1 = (r.stderr or "").splitlines()[0][:160] if getattr(r, "stderr", None) else ""
+        return (display_name, model, root, r.exit_code, dt, sorted(r.files.keys()), stderr1, None)
+    except Exception as e:
+        dt = time.time() - t0
+        return (display_name, model, root, -1, dt, [], "", str(e))
+
+runners = _get_runners()
+
+jobs = results
+results = []
+
+def record(res):
+    global passed, failed, skipped, errors, results
+    display_name, model, root, exit_code, dt, out_files, stderr1, err = res
+    if err is None:
+        ok = exit_code == 0
+        tag = "\033[32mPASS\033[0m" if ok else "\033[33mFAIL\033[0m"
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+        out_names = ", ".join(out_files)
+        extra = f"  {stderr1}" if (exit_code == -1 and stderr1) else ""
+        print(
+            f"  {tag}  {display_name:25s}  {model:10s}  {root:25s}  "
+            f"exit={exit_code:3d}  {dt:5.2f}s  [{out_names}]{extra}"
+        )
+    else:
+        err_msg = err
+        if "too large" in err_msg or "OUT_OF_RANGE" in err_msg:
+            import re as _re
+            m = _re.search(r"(\d{6,}) bytes", err_msg)
+            size_mb = int(m.group(1)) / 1e6 if m else 0
+            print(
+                f"  \033[36mSKIP\033[0m  {display_name:25s}  {model:10s}  "
+                f"{root:25s}  {dt:5.2f}s  "
+                f"output too large for RunSync ({size_mb:.0f} MB)"
+            )
+            skipped += 1
+        else:
+            err_str = err_msg.split("\n")[0][:120]
+            print(
+                f"  \033[31mERR \033[0m  {display_name:25s}  {model:10s}  "
+                f"{root:25s}  {dt:5.2f}s  {err_str}"
+            )
+            errors += 1
+    results.append(res)
+
+if not runners:
+    # Single target mode (backwards compatible)
+    for display_name, model, root, inputs in jobs:
+        record(run_one(target, display_name, model, root, inputs))
+else:
+    # Pool mode: run one in-flight job per runner.
+    with ThreadPoolExecutor(max_workers=len(runners)) as ex:
+        futs = []
+        for i, (display_name, model, root, inputs) in enumerate(jobs):
+            runner = runners[i % len(runners)]
+            futs.append(ex.submit(run_one, runner, display_name, model, root, inputs))
+        for fut in as_completed(futs):
+            record(fut.result())
 
 total = passed + failed + errors
 total_time = sum(r[4] for r in results)

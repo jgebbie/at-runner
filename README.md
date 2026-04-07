@@ -72,14 +72,33 @@ Integration tests use real case files from the AT repo’s `tests/` tree.
 ./scripts/test-smoke.sh              # quick three-tier API check (needs running server)
 ./scripts/test-integration.sh        # pytest (needs running server + venv)
 ./scripts/test-sweep.sh              # broad RunSync sweep (needs running server + venv)
+./scripts/test-sweep-compose.sh      # sweep via a docker-compose runner pool (no local venv)
 ```
 
 Set **`AT_RUNNER_TARGET`** (default `localhost:50051`) if the server is not local.
+
+`test-sweep.sh` can also distribute work across a **runner pool** when `RUNNERS` is set:
+
+```bash
+RUNNERS="runner-1:50051,runner-2:50051,runner-3:50051,runner-4:50051,runner-5:50051,runner-6:50051" ./scripts/test-sweep.sh
+```
 
 **Compose harness** (multiple runners + drivers): build the **`at-runner`** image once from the repository root (`docker build -t at-runner .` — same tag the Compose file expects), then after `fetch-at-tests.sh` (or set `AT_TESTS_COMPOSE_MOUNT` to your `tests/` path), from `testing/`:
 
 ```bash
 docker compose -f docker-compose.yml up --abort-on-container-exit
+```
+
+To run just the **sweep** against the compose runner pool:
+
+```bash
+./scripts/test-sweep-compose.sh
+```
+
+If you see widespread `SIGILL` / “Illegal instruction” failures from AT executables on older CPUs, run the compose sweep with a locally-built, portable AT binaries image:
+
+```bash
+BUILD_AT_LOCAL=1 ./scripts/test-sweep-compose.sh
 ```
 
 ## Conventions (summary)
