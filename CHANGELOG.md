@@ -4,10 +4,14 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## v0.2.0 (2026-04-09)
 
-### Added
+### Feat
 
-- Structured server logging with per-RPC `session_id` (UUID), execution status, exit codes, and file transfer details; configurable via `RUST_LOG` (see ARCHITECTURE.md **Logging**).
-- Contribution guidelines, Commitizen configuration, and GitHub Actions CI.
-- Prek (`.pre-commit-config.yaml`), Dependabot for GitHub Actions and Cargo, `SECURITY.md`, and expanded CI (prek, Rust client build / test compile, `cargo test` for the service).
+- enhance GitHub Actions release workflow with manual input options
+- pin AT image version in GitHub Actions Docker workflow
+- support multi-platform builds in GitHub Actions Docker workflow
+- add GitHub Actions workflow for Docker release automation
+- add docker-compose support for sweep tests and enhance runner configuration
+- enhance test execution with concurrent runners and improved timing management
+- implement session management and enhance logging
