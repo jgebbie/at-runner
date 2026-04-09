@@ -27,11 +27,8 @@ jobs:
       - uses: j178/prek-action@v2
 
   rust:
-    name: Rust service (clippy, build, test)
+    name: Rust workspace (clippy, build, test)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: service
     steps:
       - uses: actions/checkout@v4
 
@@ -43,38 +40,17 @@ jobs:
           components: clippy
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --workspace --all-targets --all-features
 
       - name: cargo build
-        run: cargo build --release
+        run: cargo build --release --workspace
 
+      # Client integration tests need a live server; compile them only (matches previous CI).
       - name: cargo test
-        run: cargo test
-
-  rust-client:
-    name: Rust client (clippy, build, test compile)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: client/rust
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features
-
-      - name: cargo build
-        run: cargo build
-
-      - name: cargo test --no-run
-        run: cargo test --no-run
+        run: |
+          cargo test -p at-runner
+          cargo test -p at-test-driver
+          cargo test -p at-runner-client --no-run
 
   python-client:
     name: Python client

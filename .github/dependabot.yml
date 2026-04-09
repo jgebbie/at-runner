@@ -6,11 +6,6 @@ updates:
       interval: weekly
 
   - package-ecosystem: cargo
-    directory: /service
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: cargo
-    directory: /client/rust
+    directory: /
     schedule:
       interval: weekly

@@ -9,6 +9,7 @@ For **API design, session model, supported executables, streaming behavior, and 
 ## Layout
 
 ```
+├── Cargo.toml          # Rust workspace (service, client/rust, testing/rust); Cargo.lock at repo root
 ├── proto/              # at.runner.v1 — shared by server and clients
 ├── service/            # Rust gRPC server (at-runner binary)
 ├── client/
@@ -24,7 +25,7 @@ Fortran **test fixtures** are not committed here. Use `./scripts/fetch-at-tests.
 
 ## Requirements
 
-- **Rust** (edition in `service/Cargo.toml`) and **protobuf compiler** (`protoc`) to build the server from source.
+- **Rust** (workspace in root `Cargo.toml`; edition `2021` in member crates) and **protobuf compiler** (`protoc`) to build from source.
 - **Docker** (optional) for the full image and scripted tests.
 - **Python 3.12+** for the client and shell test scripts, for example:
   `python3 -m venv client/python/.venv && . client/python/.venv/bin/activate && pip install -e './client/python[dev]'`
@@ -60,9 +61,10 @@ AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 ./scripts/server-start.sh
 
 ### Local Rust binary
 
+The repo root is a **Cargo workspace** (see root `Cargo.toml`); the server binary is built with `-p at-runner`.
+
 ```bash
-cd service
-cargo build --release
+cargo build --release -p at-runner
 # Run against AT executables on disk (same layout as make install → bin/)
 ./target/release/at-runner --bin-dir /path/to/at/bin --workspace /tmp/at-ws --port 50051
 ```

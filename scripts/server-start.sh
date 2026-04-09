@@ -39,7 +39,7 @@ fi
 
 # --- Local mode ---
 
-SERVER="$REPO/service/target/release/at-runner"
+SERVER="$REPO/target/release/at-runner"
 WORKSPACE="/tmp/at-workspace-$$"
 
 if [[ -f "$PIDFILE" ]]; then
@@ -55,7 +55,7 @@ fi
 
 if [[ ! -x "$SERVER" ]]; then
     echo "==> Building server..."
-    (cd "$REPO/service" && PATH="$HOME/.local/bin:$PATH" cargo build --release)
+    (cd "$REPO" && PATH="$HOME/.local/bin:$PATH" cargo build --release -p at-runner)
 fi
 
 # libgfortran for the AT executables

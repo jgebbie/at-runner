@@ -6,10 +6,13 @@ FROM ${AT_IMAGE} AS at-binaries
 FROM rust:bookworm AS rust-builder
 RUN apt-get update && apt-get install -y protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
-COPY proto/   /build/proto/
+COPY Cargo.toml Cargo.lock /build/
+COPY proto/ /build/proto/
 COPY service/ /build/service/
-WORKDIR /build/service
-RUN cargo build --release
+COPY client/rust/ /build/client/rust/
+COPY testing/rust/ /build/testing/rust/
+WORKDIR /build
+RUN cargo build --release -p at-runner
 
 # Stage 3: Minimal runtime image
 FROM debian:bookworm-slim
@@ -25,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certifi
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /at/bin /workspace
 COPY --from=at-binaries /at/bin/ /at/bin/
-COPY --from=rust-builder /build/service/target/release/at-runner /usr/local/bin/
+COPY --from=rust-builder /build/target/release/at-runner /usr/local/bin/
 EXPOSE 50051
 HEALTHCHECK --interval=5s --timeout=2s --retries=3 \
     CMD ["grpc_health_probe", "-addr=:50051"]

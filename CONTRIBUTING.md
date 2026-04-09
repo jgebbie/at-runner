@@ -19,7 +19,7 @@ Do **not** open a public issue for security vulnerabilities. See **[SECURITY.md]
 
 ### Prerequisites
 
-- **Rust** (stable) and **protobuf compiler** (`protoc`) for `service/`.
+- **Rust** (stable) and **protobuf compiler** (`protoc`) for the Cargo workspace at the repo root (`service/`, `client/rust/`, `testing/rust/`).
 - **Python 3.12+** for the Python client and tooling (see [README.md](README.md)).
 - **Docker** (optional) for the full image and integration-style flows.
 
@@ -32,7 +32,7 @@ Avoid long-lived branches; prefer small, reviewable PRs.
 
 ## Git hooks (prek)
 
-We use **[prek](https://github.com/j178/prek)** — a Rust implementation that runs the same hook configuration as [pre-commit](https://pre-commit.com/) (this repo’s [`.pre-commit-config.yaml`](.pre-commit-config.yaml)). Hooks cover common file checks and **`cargo fmt`** for `service/` and `client/rust/`.
+We use **[prek](https://github.com/j178/prek)** — a Rust implementation that runs the same hook configuration as [pre-commit](https://pre-commit.com/) (this repo’s [`.pre-commit-config.yaml`](.pre-commit-config.yaml)). Hooks cover common file checks and **`cargo fmt`** for the whole Rust workspace (repo root).
 
 1. Install **prek** (see the [prek repository](https://github.com/j178/prek) for installers, e.g. `cargo install prek`, Homebrew, or the release binary).
 2. From the repository root: **`prek install`** — registers the Git hook.
@@ -110,7 +110,7 @@ cz check --rev-range main..HEAD
 We use **Semantic Versioning** (`MAJOR.MINOR.PATCH`) and **[Commitizen](https://commitizen-tools.github.io/commitizen/)** to bump versions and maintain the changelog.
 
 - **Configuration** lives in the root [`pyproject.toml`](pyproject.toml) under `[tool.commitizen]`.
-- **Versioned files** include `service/Cargo.toml`, `client/python/pyproject.toml`, `client/rust/Cargo.toml`, and the workspace `pyproject.toml` (kept in sync).
+- **Versioned files** include `service/Cargo.toml`, `client/python/pyproject.toml`, `client/rust/Cargo.toml`, and the workspace `pyproject.toml` (kept in sync). Rust uses a single **`Cargo.lock`** at the repository root; after bumping crate versions, run `cargo build --workspace` (or any build from the repo root) so the lockfile stays aligned.
 
 ### Bump
 
@@ -145,14 +145,14 @@ Automation lives under [`.github/workflows/`](.github/workflows/).
 
 | Workflow | Purpose |
 |----------|---------|
-| **CI** | **Prek** hooks; Rust service `clippy` / `build` / `test`; Rust client `clippy` / `build` / `cargo test --no-run` (compile integration tests without running them); Python client install + byte-compile — on pushes and PRs to **`main`**. |
+| **CI** | **Prek** hooks; Rust workspace `clippy` / `build` / `test` (server + test driver; client crate tests compiled with `--no-run` because integration tests need a running server); Python client install + byte-compile — on pushes and PRs to **`main`**. |
 | **Commit messages** | On pull requests, validates that commits in the PR range follow Conventional Commits (`cz check`). |
 
 Forks receive the same checks on PRs.
 
 ## Style notes
 
-- **Rust:** `cargo fmt` (via **prek** locally and in CI) and `cargo clippy` (see CI). Match existing patterns in `service/`.
+- **Rust:** `cargo fmt` (via **prek** locally and in CI) and `cargo clippy` (see CI). Match existing patterns; run Cargo commands from the repo root so the workspace lockfile applies.
 - **Python:** Follow the style of `client/python/`; keep public API changes documented in the PR.
 - **Protobuf:** API changes belong in `proto/` and require a version bump and changelog entry under the appropriate `feat`/`fix`/`break` rules.
 

@@ -13,9 +13,8 @@ fn main() {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let tests_dir = PathBuf::from(
-        std::env::var("TESTS_DIR").unwrap_or_else(|_| "/tests".to_string()),
-    );
+    let tests_dir =
+        PathBuf::from(std::env::var("TESTS_DIR").unwrap_or_else(|_| "/tests".to_string()));
 
     let tests = discover_tests(&tests_dir);
     if tests.is_empty() {
@@ -41,10 +40,8 @@ fn main() {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    let mut assignments: HashMap<String, Vec<TestCase>> = runners
-        .iter()
-        .map(|r| (r.clone(), Vec::new()))
-        .collect();
+    let mut assignments: HashMap<String, Vec<TestCase>> =
+        runners.iter().map(|r| (r.clone(), Vec::new())).collect();
     let mut loads: HashMap<String, f64> = runners.iter().map(|r| (r.clone(), 0.0)).collect();
 
     let mut tests_sorted = tests;
@@ -102,10 +99,12 @@ fn main() {
                         let _g = print_lock.lock().unwrap();
                         println!(" {} ({:.1}s)", status, elapsed);
                     }
-                    results_lock
-                        .lock()
-                        .unwrap()
-                        .push((test.name.clone(), test.tier, status, elapsed));
+                    results_lock.lock().unwrap().push((
+                        test.name.clone(),
+                        test.tier,
+                        status,
+                        elapsed,
+                    ));
                 }
             });
         }
@@ -127,7 +126,10 @@ fn main() {
     let errors = results.iter().filter(|r| r.2 == "error").count();
 
     println!("\n{}", "=".repeat(60));
-    println!("Results: {} passed, {} failed, {} errors", passed, failed, errors);
+    println!(
+        "Results: {} passed, {} failed, {} errors",
+        passed, failed, errors
+    );
     println!("{}", "=".repeat(60));
 
     if failed > 0 || errors > 0 {
@@ -205,7 +207,14 @@ fn discover_tests(dir: &Path) -> Vec<TestCase> {
 fn detect_models(test_dir: &Path) -> Vec<String> {
     let makefile = test_dir.join("Makefile");
     let known = [
-        "bellhop", "bellhop3d", "kraken", "krakenc", "bounce", "field", "field3d", "scooter",
+        "bellhop",
+        "bellhop3d",
+        "kraken",
+        "krakenc",
+        "bounce",
+        "field",
+        "field3d",
+        "scooter",
         "sparc",
     ];
 
@@ -225,7 +234,12 @@ fn detect_models(test_dir: &Path) -> Vec<String> {
         .into_iter()
         .flatten()
         .flatten()
-        .any(|e| e.path().extension().map(|ext| ext == "flp").unwrap_or(false));
+        .any(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "flp")
+                .unwrap_or(false)
+        });
 
     if has_flp {
         vec!["kraken".to_string(), "field".to_string()]
@@ -240,10 +254,7 @@ fn collect_inputs(test_dir: &Path) -> HashMap<String, Vec<u8>> {
         for entry in entries.flatten() {
             if entry.path().is_file() {
                 if let Ok(data) = fs::read(entry.path()) {
-                    inputs.insert(
-                        entry.file_name().to_string_lossy().to_string(),
-                        data,
-                    );
+                    inputs.insert(entry.file_name().to_string_lossy().to_string(), data);
                 }
             }
         }
@@ -256,7 +267,12 @@ fn file_root(test_dir: &Path) -> String {
         .into_iter()
         .flatten()
         .flatten()
-        .find(|e| e.path().extension().map(|ext| ext == "env").unwrap_or(false))
+        .find(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "env")
+                .unwrap_or(false)
+        })
         .map(|e| e.path().file_stem().unwrap().to_string_lossy().to_string())
         .unwrap_or_default()
 }
@@ -264,7 +280,10 @@ fn file_root(test_dir: &Path) -> String {
 fn run_tier1(runner: &str, test: &TestCase) -> String {
     let inputs = collect_inputs(&test.path);
     let root = file_root(&test.path);
-    let input_refs: Vec<(&str, &[u8])> = inputs.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+    let input_refs: Vec<(&str, &[u8])> = inputs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_slice()))
+        .collect();
 
     match run_sync(runner, &test.models[0], &root, &input_refs) {
         Ok(result) => {
@@ -323,7 +342,10 @@ async fn run_tier3(runner: &str, test: &TestCase) -> String {
     for (i, model) in test.models.iter().enumerate() {
         let step_id = format!("{}_{}", model, i);
         let step_inputs: Vec<(&str, &[u8])> = if i == 0 {
-            inputs.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect()
+            inputs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_slice()))
+                .collect()
         } else {
             Vec::new()
         };
