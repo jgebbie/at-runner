@@ -8,7 +8,22 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "OCI tag to publish (e.g. v0.2.0). Required for manual runs."
+        required: true
+        type: string
+      at_image:
+        description: "AT base image (Dockerfile build-arg AT_IMAGE)"
+        required: true
+        default: ghcr.io/jgebbie/at:at_2026_2_2
+        type: string
+      push_latest:
+        description: "Also push the latest tag (only if this build should become the default latest)"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,11 +34,14 @@ jobs:
     name: Build & push image to GHCR
     runs-on: ubuntu-latest
     env:
-      # Safe default: pin to a known multi-arch AT image tag (NOT :latest).
-      # Override at run time (workflow_dispatch) or in future edits as AT updates.
+      # Default for tag-push releases; workflow_dispatch overwrites via the step below.
       AT_IMAGE: ghcr.io/jgebbie/at:at_2026_2_2
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set AT_IMAGE from workflow inputs
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "AT_IMAGE=${{ inputs.at_image }}" >> "$GITHUB_ENV"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -38,14 +56,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata (tags, labels)
-        id: meta
+      # type=ref,event=tag only applies to push events with a tag ref — not workflow_dispatch.
+      - name: Docker metadata (git tag release)
+        id: meta_push
+        if: github.event_name == 'push'
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest
+
+      - name: Docker metadata (manual)
+        id: meta_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ inputs.image_tag }}
+            type=raw,value=latest,enable=${{ inputs.push_latest }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -56,5 +86,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             AT_IMAGE=${{ env.AT_IMAGE }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta_push.outputs.tags || steps.meta_dispatch.outputs.tags }}
+          labels: ${{ steps.meta_push.outputs.labels || steps.meta_dispatch.outputs.labels }}
