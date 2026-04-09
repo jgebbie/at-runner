@@ -110,7 +110,7 @@ cz check --rev-range main..HEAD
 We use **Semantic Versioning** (`MAJOR.MINOR.PATCH`) and **[Commitizen](https://commitizen-tools.github.io/commitizen/)** to bump versions and maintain the changelog.
 
 - **Configuration** lives in the root [`pyproject.toml`](pyproject.toml) under `[tool.commitizen]`.
-- **Versioned files** include `service/Cargo.toml`, `client/python/pyproject.toml`, `client/rust/Cargo.toml`, and the workspace `pyproject.toml` (kept in sync). Rust uses a single **`Cargo.lock`** at the repository root; after bumping crate versions, run `cargo build --workspace` (or any build from the repo root) so the lockfile stays aligned.
+- **Versioned files** are listed in **`version_files`** there: `service/Cargo.toml`, `client/rust/Cargo.toml`, `testing/rust/Cargo.toml`, `client/python/pyproject.toml`, and the workspace `pyproject.toml` (two version fields). A **`pre_bump_hooks`** entry runs `cargo build --workspace` so the root **`Cargo.lock`** is refreshed in the same commit as the version bump (see **[RELEASE.md](RELEASE.md)**).
 
 ### Bump
 
@@ -125,11 +125,14 @@ This:
 1. Chooses the next version from commit history (including `BREAKING CHANGE` / `feat!` / `fix!`).
 2. Updates `CHANGELOG.md` (Keep a Changelog style).
 3. Updates the version fields listed in `version_files`.
-4. Creates a commit and (by default) a tag `vX.Y.Z`.
+4. Runs **`pre_bump_hooks`** (refresh **`Cargo.lock`** via `scripts/commitizen-pre-bump-cargo-lock.sh`).
+5. Creates a commit and (by default) a tag `vX.Y.Z`.
 
 Use `cz bump --dry-run` to preview. Options such as `--increment PATCH|MINOR|MAJOR` are available when you need a manual override.
 
 **Tags** follow `v$version` (for example `v0.2.0`).
+
+**Step-by-step checklist:** **[RELEASE.md](RELEASE.md)**.
 
 ## Pull requests
 

@@ -128,7 +128,7 @@ Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the code of conduct, [Conventional Commits](https://www.conventionalcommits.org/), [Commitizen](https://commitizen-tools.github.io/commitizen/) versioning (`cz bump`, `CHANGELOG.md`), and what runs in GitHub Actions.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the code of conduct, [Conventional Commits](https://www.conventionalcommits.org/), and what runs in GitHub Actions. For releases, **[RELEASE.md](RELEASE.md)** describes `cz bump`, lockfile refresh, and pushing tags.
 
 ## Related repositories
 

@@ -30,5 +30,9 @@ version_files = [
     "service/Cargo.toml:^version",
     "client/python/pyproject.toml:^version",
     "client/rust/Cargo.toml:^version",
+    "testing/rust/Cargo.toml:^version",
     "pyproject.toml:^version",
 ]
+# After version_files are updated, refresh root Cargo.lock before the bump commit.
+# (post_bump_hooks run after commit+tag, too late to include Cargo.lock in that commit.)
+pre_bump_hooks = ["bash ./scripts/commitizen-pre-bump-cargo-lock.sh"]
