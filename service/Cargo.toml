@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 tonic = "0.13"
-tonic-health = "0.13"
+tonic-health = "0.14"
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
