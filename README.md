@@ -35,21 +35,27 @@ Fortran **test fixtures** are not committed here. Use `./scripts/fetch-at-tests.
 
 ### Docker (default / recommended)
 
-The [Dockerfile](Dockerfile) pulls prebuilt AT binaries from **`ghcr.io/jgebbie/at:latest`** (first stage) and compiles the Rust service. To use another AT image (pin a tag or digest), pass `AT_IMAGE` at build time.
+The [Dockerfile](Dockerfile) defaults to **`ghcr.io/jgebbie/at:latest`** for the first stage (AT binaries). For **reproducible builds** and for **multi-arch** images (amd64 + arm64), **pin a version tag** on `ghcr.io/jgebbie/at` instead of `:latest` — the AT repo publishes multi-arch manifests for tags like `at_2026_2_2`, while `:latest` is not updated by that automation.
+
+**Recommended** (pinned AT, matches what the [release workflow](.github/workflows/release.yml) uses when publishing to GHCR):
 
 ```bash
-docker build --build-arg AT_IMAGE=ghcr.io/jgebbie/at:latest -t at-runner .
+docker build --build-arg AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 -t at-runner .
 docker run -p 50051:50051 \
   --tmpfs /workspace:rw,noexec,nosuid,size=512m \
   at-runner
 ```
 
-Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`.
-
-To start with a specific AT image via the helper:
+**Optional** (Dockerfile default — convenient for quick local builds only):
 
 ```bash
-AT_IMAGE=ghcr.io/jgebbie/at:latest ./scripts/server-start.sh
+docker build -t at-runner .
+```
+
+Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`. The helper defaults to **`AT_IMAGE=ghcr.io/jgebbie/at:latest`** when it builds the image; override for a pinned base:
+
+```bash
+AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 ./scripts/server-start.sh
 ```
 
 ### Local Rust binary
@@ -83,7 +89,13 @@ Set **`AT_RUNNER_TARGET`** (default `localhost:50051`) if the server is not loca
 RUNNERS="runner-1:50051,runner-2:50051,runner-3:50051,runner-4:50051,runner-5:50051,runner-6:50051" ./scripts/test-sweep.sh
 ```
 
-**Compose harness** (multiple runners + drivers): build the **`at-runner`** image once from the repository root (`docker build -t at-runner .` — same tag the Compose file expects), then after `fetch-at-tests.sh` (or set `AT_TESTS_COMPOSE_MOUNT` to your `tests/` path), from `testing/`:
+**Compose harness** (multiple runners + drivers): build the **`at-runner`** image once from the repository root (same tag the Compose file expects). Prefer pinning `AT_IMAGE` for consistency with releases, for example:
+
+```bash
+docker build --build-arg AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 -t at-runner .
+```
+
+Then after `fetch-at-tests.sh` (or set `AT_TESTS_COMPOSE_MOUNT` to your `tests/` path), from `testing/`:
 
 ```bash
 docker compose -f docker-compose.yml up --abort-on-container-exit
