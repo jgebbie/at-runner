@@ -9,3 +9,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # prost and tonic must stay on matching major/minor lines; separate PRs (e.g. only
+    # prost 0.14) break the build with E0277 (Message trait from two prost versions).
+    groups:
+      grpc:
+        patterns:
+          - "prost*"
+          - "tonic*"
