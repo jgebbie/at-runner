@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "at-runner-workspace"
-version = "0.2.1"
+version = "0.2.2"
 description = "Workspace metadata for tooling (Commitizen). Not published to PyPI."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,7 +22,7 @@ egg_base = ".egg-base"
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.2.1"
+version = "0.2.2"
 tag_format = "v$version"
 changelog_file = "CHANGELOG.md"
 update_changelog_on_bump = true
