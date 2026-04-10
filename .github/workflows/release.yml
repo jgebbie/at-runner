@@ -60,7 +60,7 @@ jobs:
       - name: Docker metadata (git tag release)
         id: meta_push
         if: github.event_name == 'push'
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -70,7 +70,7 @@ jobs:
       - name: Docker metadata (manual)
         id: meta_dispatch
         if: github.event_name == 'workflow_dispatch'
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
