@@ -44,7 +44,7 @@ pub struct AppState {
     pub allowlist: HashSet<String>,
     pub default_timeout: u64,
     pub chunk_size: usize,
-    pub exec_lock: tokio::sync::RwLock<()>,
+    pub exec_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 #[tokio::main]
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allowlist,
         default_timeout: cli.default_timeout,
         chunk_size: cli.chunk_size,
-        exec_lock: tokio::sync::RwLock::new(()),
+        exec_lock: Arc::new(tokio::sync::RwLock::new(())),
     });
 
     let runner_svc = runner::RunnerService::new(state.clone());

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -18,7 +19,8 @@ pub async fn run_pipeline(
 ) -> Result<Response<ReceiverStream<Result<proto::PipelineOutput, Status>>>, Status> {
     let _write_guard = state
         .exec_lock
-        .try_write()
+        .clone()
+        .try_write_owned()
         .map_err(|_| Status::failed_precondition("another Run or RunPipeline is active"))?;
 
     let req = request.into_inner();
@@ -127,6 +129,7 @@ pub async fn run_pipeline(
 
     let pipeline_sid: Arc<String> = Arc::new(session_id);
     tokio::spawn(async move {
+        let _guard = _write_guard;
         let start = Instant::now();
         let deadline = tokio::time::Instant::now() + overall_timeout;
 
@@ -414,51 +417,76 @@ pub async fn run_pipeline(
 
                                 // Stream file chunks
                                 for (name, path) in &files {
-                                    let data = match tokio::fs::read(path).await {
-                                        Ok(d) => d,
+                                    let mut file = match tokio::fs::File::open(path).await {
+                                        Ok(f) => f,
                                         Err(e) => {
                                             tracing::warn!(
                                                 session_id = pipeline_sid_task.as_str(),
                                                 step_id = %sid,
                                                 file = %name,
                                                 error = %e,
-                                                "skip step output file (read failed)"
+                                                "skip step output file (open failed)"
                                             );
                                             continue;
                                         }
                                     };
-                                    let len = data.len() as u64;
-                                    let num_chunks = data.len().div_ceil(chunk_size);
-                                    let mut offset = 0;
+
+                                    let len = match file.metadata().await {
+                                        Ok(m) => m.len(),
+                                        Err(_) => 0,
+                                    };
+                                    let num_chunks = len.div_ceil(chunk_size as u64);
+
+                                    let mut buf = vec![0u8; chunk_size];
                                     let mut first = true;
-                                    while offset < data.len() {
-                                        let end = (offset + chunk_size).min(data.len());
-                                        let _ = out_tx2
-                                            .send(Ok(proto::PipelineOutput {
-                                                payload: Some(
-                                                    proto::pipeline_output::Payload::Step(
+
+                                    loop {
+                                        match file.read(&mut buf).await {
+                                            Ok(0) => {
+                                                if first {
+                                                    let _ = out_tx2.send(Ok(proto::PipelineOutput {
+                                                        payload: Some(proto::pipeline_output::Payload::Step(
+                                                            proto::StepEvent {
+                                                                step_id: sid.clone(),
+                                                                detail: Some(proto::step_event::Detail::File(
+                                                                    FileChunk {
+                                                                        name: name.clone(),
+                                                                        data: Vec::new(),
+                                                                    }
+                                                                )),
+                                                            }
+                                                        ))
+                                                    })).await;
+                                                }
+                                                break;
+                                            }
+                                            Ok(n) => {
+                                                let _ = out_tx2.send(Ok(proto::PipelineOutput {
+                                                    payload: Some(proto::pipeline_output::Payload::Step(
                                                         proto::StepEvent {
                                                             step_id: sid.clone(),
-                                                            detail: Some(
-                                                                proto::step_event::Detail::File(
-                                                                    FileChunk {
-                                                                        name: if first {
-                                                                            name.clone()
-                                                                        } else {
-                                                                            String::new()
-                                                                        },
-                                                                        data: data[offset..end]
-                                                                            .to_vec(),
-                                                                    },
-                                                                ),
-                                                            ),
-                                                        },
-                                                    ),
-                                                ),
-                                            }))
-                                            .await;
-                                        first = false;
-                                        offset = end;
+                                                            detail: Some(proto::step_event::Detail::File(
+                                                                FileChunk {
+                                                                    name: if first { name.clone() } else { String::new() },
+                                                                    data: buf[..n].to_vec(),
+                                                                }
+                                                            )),
+                                                        }
+                                                    ))
+                                                })).await;
+                                                first = false;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    session_id = pipeline_sid_task.as_str(),
+                                                    step_id = %sid,
+                                                    file = %name,
+                                                    error = %e,
+                                                    "error reading output file"
+                                                );
+                                                break;
+                                            }
+                                        }
                                     }
                                     tracing::info!(
                                         session_id = pipeline_sid_task.as_str(),

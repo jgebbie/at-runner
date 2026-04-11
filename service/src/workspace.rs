@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -33,7 +34,10 @@ pub async fn upload_file(
 
     let mut stream = request.into_inner();
     let mut filename: Option<String> = None;
-    let mut buf = Vec::new();
+    let mut final_path: Option<std::path::PathBuf> = None;
+    let mut tmp_path: Option<std::path::PathBuf> = None;
+    let mut file: Option<tokio::fs::File> = None;
+    let mut total_size = 0u64;
 
     while let Some(chunk) = stream.message().await? {
         if !chunk.name.is_empty() {
@@ -43,27 +47,59 @@ pub async fn upload_file(
                 ));
             }
             validate_filename(&chunk.name)?;
-            filename = Some(chunk.name);
+            filename = Some(chunk.name.clone());
+
+            let path = state.workspace.join(&chunk.name);
+            let t_path = path.with_extension("tmp_upload");
+            final_path = Some(path);
+            tmp_path = Some(t_path.clone());
+
+            let mut f = tokio::fs::File::create(&t_path)
+                .await
+                .map_err(|e| Status::internal(format!("create failed: {e}")))?;
+
+            f.write_all(&chunk.data)
+                .await
+                .map_err(|e| Status::internal(format!("write failed: {e}")))?;
+            total_size += chunk.data.len() as u64;
+            file = Some(f);
+        } else {
+            if let Some(f) = file.as_mut() {
+                f.write_all(&chunk.data)
+                    .await
+                    .map_err(|e| Status::internal(format!("write failed: {e}")))?;
+                total_size += chunk.data.len() as u64;
+            } else {
+                return Err(Status::invalid_argument(
+                    "no filename provided in first chunk",
+                ));
+            }
         }
-        buf.extend_from_slice(&chunk.data);
     }
 
-    let name = filename.ok_or_else(|| Status::invalid_argument("no filename provided"))?;
-    let path = state.workspace.join(&name);
-    tokio::fs::write(&path, &buf)
-        .await
-        .map_err(|e| Status::internal(format!("write failed: {e}")))?;
+    if let (Some(f), Some(p), Some(tp)) = (file, final_path, tmp_path) {
+        f.sync_all()
+            .await
+            .map_err(|e| Status::internal(format!("sync failed: {e}")))?;
+        // Drop the file to close it before renaming
+        drop(f);
+        tokio::fs::rename(&tp, &p)
+            .await
+            .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
+    } else {
+        return Err(Status::invalid_argument("no filename provided"));
+    }
 
+    let name = filename.unwrap();
     info!(
         session_id = %session_id,
         file = %name,
-        size_bytes = buf.len(),
-        path = %path.display(),
+        size_bytes = total_size,
         "upload_file completed"
     );
     Ok(Response::new(UploadResponse {
         name,
-        size_bytes: buf.len() as u64,
+        size_bytes: total_size,
     }))
 }
 
@@ -82,13 +118,18 @@ pub async fn get_file(
         return Err(Status::not_found(format!("file not found: {}", req.name)));
     }
 
-    let data = tokio::fs::read(&path)
+    let mut file = tokio::fs::File::open(&path)
         .await
-        .map_err(|e| Status::internal(format!("read failed: {e}")))?;
+        .map_err(|e| Status::internal(format!("open failed: {e}")))?;
+
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|e| Status::internal(format!("metadata failed: {e}")))?;
 
     let chunk_size = state.chunk_size;
-    let total = data.len();
-    let num_chunks = total.div_ceil(chunk_size);
+    let total = metadata.len();
+    let num_chunks = total.div_ceil(chunk_size as u64);
     let name = req.name.clone();
     info!(
         session_id = %session_id,
@@ -102,19 +143,37 @@ pub async fn get_file(
     let (tx, rx) = mpsc::channel(4);
 
     tokio::spawn(async move {
-        let mut offset = 0;
+        let mut buf = vec![0u8; chunk_size];
         let mut first = true;
-        while offset < data.len() {
-            let end = (offset + chunk_size).min(data.len());
-            let chunk = FileChunk {
-                name: if first { name.clone() } else { String::new() },
-                data: data[offset..end].to_vec(),
-            };
-            first = false;
-            if tx.send(Ok(chunk)).await.is_err() {
-                break;
+        loop {
+            match file.read(&mut buf).await {
+                Ok(0) => {
+                    if first {
+                        let chunk = FileChunk {
+                            name: name.clone(),
+                            data: Vec::new(),
+                        };
+                        let _ = tx.send(Ok(chunk)).await;
+                    }
+                    break;
+                }
+                Ok(n) => {
+                    let chunk = FileChunk {
+                        name: if first { name.clone() } else { String::new() },
+                        data: buf[..n].to_vec(),
+                    };
+                    first = false;
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(Status::internal(format!("read failed: {e}"))))
+                        .await;
+                    break;
+                }
             }
-            offset = end;
         }
     });
 
