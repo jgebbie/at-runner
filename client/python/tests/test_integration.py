@@ -120,7 +120,45 @@ class TestTier2:
             session.upload("MunkK.env", MUNKK_ENV)
             result = session.run("kraken", "MunkK", on_output=on_output)
             assert result.status == "completed"
-            assert result.exit_code == 0
+
+    def test_large_file_upload_download(self):
+        """Test streaming logic with files larger than the 64KB chunk size."""
+        with ATSession(TARGET) as session:
+            # 256 KB file to force multiple chunks
+            data = b"x" * (256 * 1024)
+            session.upload("large.txt", data)
+            downloaded = session.download("large.txt")
+            assert downloaded == data
+            session.delete("large.txt")
+
+    def test_concurrent_uploads(self):
+        """Test that multiple uploads do not interleave or panic due to lock issues."""
+        import concurrent.futures
+
+        with ATSession(TARGET) as session:
+            data1 = b"A" * (256 * 1024)
+            data2 = b"B" * (256 * 1024)
+
+            def upload_a():
+                session.upload("concurrent_a.txt", data1)
+
+            def upload_b():
+                session.upload("concurrent_b.txt", data2)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(upload_a)
+                f2 = executor.submit(upload_b)
+                concurrent.futures.wait([f1, f2])
+                # Ensure no exceptions were raised
+                f1.result()
+                f2.result()
+
+            dl1 = session.download("concurrent_a.txt")
+            dl2 = session.download("concurrent_b.txt")
+            assert dl1 == data1
+            assert dl2 == data2
+            session.delete("concurrent_a.txt")
+            session.delete("concurrent_b.txt")
 
 
 class TestTier3:

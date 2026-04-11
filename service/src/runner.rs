@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -197,7 +198,8 @@ impl Runner for RunnerService {
         let _write_guard = self
             .state
             .exec_lock
-            .try_write()
+            .clone()
+            .try_write_owned()
             .map_err(|_| Status::failed_precondition("another Run or RunPipeline is active"))?;
 
         let workspace = self.state.workspace.clone();
@@ -220,6 +222,7 @@ impl Runner for RunnerService {
 
         tokio::spawn(
             async move {
+                let _guard = _write_guard;
                 let send = |msg: proto::RunOutput| {
                     let tx = out_tx.clone();
                     async move { tx.send(Ok(msg)).await }
@@ -284,35 +287,66 @@ impl Runner for RunnerService {
                 // Phase 4: Stream output files
                 let mut streamed: Vec<(String, u64)> = Vec::new();
                 for (name, path) in &output_files {
-                    let data = match tokio::fs::read(path).await {
-                        Ok(d) => d,
+                    let mut file = match tokio::fs::File::open(path).await {
+                        Ok(f) => f,
                         Err(e) => {
                             warn!(
                                 session_id = %sid,
                                 file = %name,
                                 error = %e,
-                                "skip output file (read failed)"
+                                "skip output file (open failed)"
                             );
                             continue;
                         }
                     };
-                    let len = data.len() as u64;
-                    let mut offset = 0;
+
+                    let len = match file.metadata().await {
+                        Ok(m) => m.len(),
+                        Err(_) => 0,
+                    };
+                    let num_chunks = len.div_ceil(chunk_size as u64);
+
+                    let mut buf = vec![0u8; chunk_size];
                     let mut first = true;
-                    let num_chunks = data.len().div_ceil(chunk_size);
-                    while offset < data.len() {
-                        let end = (offset + chunk_size).min(data.len());
-                        let chunk = FileChunk {
-                            name: if first { name.clone() } else { String::new() },
-                            data: data[offset..end].to_vec(),
-                        };
-                        first = false;
-                        let _ = send(proto::RunOutput {
-                            payload: Some(proto::run_output::Payload::File(chunk)),
-                        })
-                        .await;
-                        offset = end;
+
+                    loop {
+                        match file.read(&mut buf).await {
+                            Ok(0) => {
+                                if first {
+                                    let chunk = FileChunk {
+                                        name: name.clone(),
+                                        data: Vec::new(),
+                                    };
+                                    let _ = send(proto::RunOutput {
+                                        payload: Some(proto::run_output::Payload::File(chunk)),
+                                    })
+                                    .await;
+                                }
+                                break;
+                            }
+                            Ok(n) => {
+                                let chunk = FileChunk {
+                                    name: if first { name.clone() } else { String::new() },
+                                    data: buf[..n].to_vec(),
+                                };
+                                first = false;
+                                let _ = send(proto::RunOutput {
+                                    payload: Some(proto::run_output::Payload::File(chunk)),
+                                })
+                                .await;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    session_id = %sid,
+                                    file = %name,
+                                    error = %e,
+                                    "error reading output file"
+                                );
+                                break;
+                            }
+                        }
                     }
+
                     streamed.push((name.clone(), len));
                     info!(
                         session_id = %sid,
