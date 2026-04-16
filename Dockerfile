@@ -14,8 +14,9 @@ COPY testing/rust/ /build/testing/rust/
 WORKDIR /build
 RUN cargo build --release -p at-runner
 
-# Stage 3: Minimal runtime image
-FROM debian:bookworm-slim
+# Stage 3: Minimal runtime image. Keep this on Ubuntu 24.04 so it is ABI
+# compatible with the AT binaries built by external/at's artifacts image.
+FROM ubuntu:24.04
 ARG GRPC_HEALTH_PROBE_VERSION=0.4.24
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates libgfortran5 \

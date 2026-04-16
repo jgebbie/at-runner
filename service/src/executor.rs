@@ -46,6 +46,15 @@ pub async fn populate_run_dir(
     let mut workspace_copied = 0u32;
     let mut entries = tokio::fs::read_dir(workspace).await?;
     while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if !file_type.is_file() && !file_type.is_symlink() {
+            debug!(
+                session_id = %session_id,
+                path = %entry.path().display(),
+                "skipping non-file workspace entry"
+            );
+            continue;
+        }
         let fname = entry.file_name();
         let dest = run_dir.join(&fname);
         if !dest.exists() {

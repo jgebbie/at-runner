@@ -14,17 +14,23 @@ MODE="${1:-}"
 if [[ -z "$MODE" || "$MODE" == "--docker" ]]; then
     echo "==> Starting at-runner via Docker on port $PORT"
     AT_IMAGE="${AT_IMAGE:-ghcr.io/jgebbie/at:latest}"
+
     # Build if image doesn't exist
     if ! docker image inspect at-runner >/dev/null 2>&1; then
         echo "    Building Docker image (first time takes ~1 min)..."
         docker build --build-arg "AT_IMAGE=$AT_IMAGE" -t at-runner "$REPO"
     fi
+
     # Stop any existing container
     docker rm -f at-runner-dev 2>/dev/null || true
+
+    # Use an empty writable workspace. Tests upload the fixtures they need,
+    # and production runs should not inherit host-side fixture directories.
     docker run -d --name at-runner-dev \
         -p "$PORT:50051" \
         --tmpfs /workspace:rw,noexec,nosuid,size=512m \
         at-runner
+
     echo "docker" > "$PIDFILE"
     echo "==> Container at-runner-dev running on port $PORT"
     echo "    Stop with: ./scripts/server-stop.sh"
