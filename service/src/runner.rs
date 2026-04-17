@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::executor::{self, ExecRequest, StreamEvent};
 use crate::proto::{self, runner_server::Runner, FileChunk};
 use crate::session::new_session_id;
+use crate::validation::{validate_file_root, validate_filename};
 use crate::{pipeline, workspace, AppState};
 
 pub struct RunnerService {
@@ -54,6 +55,10 @@ impl Runner for RunnerService {
         let session_id = new_session_id();
         let req = request.into_inner();
         let executable = self.resolve_executable(&req.model)?;
+        validate_file_root(&req.file_root)?;
+        for input in &req.inputs {
+            validate_filename(&input.name)?;
+        }
         let timeout = self.resolve_timeout(req.timeout_seconds);
 
         let _guard = self.state.exec_lock.read().await;
@@ -193,6 +198,7 @@ impl Runner for RunnerService {
         let session_id = new_session_id();
         let req = request.into_inner();
         let executable = self.resolve_executable(&req.model)?;
+        validate_file_root(&req.file_root)?;
         let timeout = self.resolve_timeout(req.timeout_seconds);
 
         let _write_guard = self

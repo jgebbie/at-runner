@@ -2,6 +2,7 @@ mod executor;
 mod pipeline;
 mod runner;
 mod session;
+mod validation;
 mod workspace;
 
 use std::collections::HashSet;

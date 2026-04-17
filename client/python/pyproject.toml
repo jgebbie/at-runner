@@ -8,13 +8,13 @@ version = "0.2.3"
 description = "Python client library for the AT Runner gRPC service"
 requires-python = ">=3.12"
 dependencies = [
-    "grpcio>=1.62",
-    "protobuf>=5.26",
+    "grpcio>=1.80",
+    "protobuf>=6.31.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "grpcio-tools>=1.62",
+    "grpcio-tools>=1.80",
     "pytest>=8",
 ]
 

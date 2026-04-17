@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::proto::{self, OutputChunk, RunCompleted, RunStatus};
+use crate::validation;
 
 pub struct ExecRequest {
     pub session_id: String,
@@ -64,6 +65,7 @@ pub async fn populate_run_dir(
     }
 
     for (name, data) in inputs {
+        validate_filename_for_io(name)?;
         let dest = run_dir.join(name);
         tokio::fs::write(&dest, data).await?;
     }
@@ -146,6 +148,7 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
         .current_dir(&req.run_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     let mut stdout_handle = child.stdout.take().unwrap();
@@ -174,14 +177,14 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
     match timeout_result {
         Ok(Ok((exit_status, stdout, stderr))) => {
             let output_files = detect_outputs(&req.run_dir, &before).await?;
-            let exit_code = exit_status.code().unwrap_or(-1);
+            let (status, exit_code) = status_from_exit(exit_status);
             let outputs_meta: Vec<(&str, u64)> = output_files
                 .iter()
                 .filter_map(|(n, p)| std::fs::metadata(p).ok().map(|m| (n.as_str(), m.len())))
                 .collect();
             info!(
                 session_id = %sid,
-                status = ?RunStatus::Completed,
+                status = ?status,
                 exit_code,
                 elapsed_secs = elapsed.as_secs_f64(),
                 stdout_bytes = stdout.len(),
@@ -191,7 +194,7 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
                 "process finished (buffered)"
             );
             Ok(BufferedResult {
-                status: RunStatus::Completed,
+                status,
                 exit_code,
                 stdout,
                 stderr,
@@ -251,6 +254,7 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
         .current_dir(&req.run_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     let mut stdout = child.stdout.take().unwrap();
@@ -267,7 +271,7 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
         if stdout_done && stderr_done {
             match tokio::time::timeout_at(deadline, child.wait()).await {
                 Ok(Ok(exit)) => {
-                    break (RunStatus::Completed, exit.code().unwrap_or(-1));
+                    break status_from_exit(exit);
                 }
                 Ok(Err(_)) => {
                     break (RunStatus::Signaled, -1);
@@ -352,6 +356,18 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
         .await;
 
     Ok(())
+}
+
+fn validate_filename_for_io(name: &str) -> io::Result<()> {
+    validation::validate_filename(name)
+        .map_err(|status| validation::invalid_input(status.message().to_string()))
+}
+
+fn status_from_exit(exit_status: std::process::ExitStatus) -> (RunStatus, i32) {
+    match exit_status.code() {
+        Some(code) => (RunStatus::Completed, code),
+        None => (RunStatus::Signaled, -1),
+    }
 }
 
 async fn kill_with_grace(child: &mut tokio::process::Child, session_id: &str) {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -11,7 +11,17 @@ use tracing::info;
 use crate::executor::{self, ExecRequest, StreamEvent};
 use crate::proto::{self, FileChunk};
 use crate::session::new_session_id;
+use crate::validation::{validate_file_root, validate_filename, validate_step_id};
 use crate::AppState;
+
+type StepFiles = Vec<(String, std::path::PathBuf)>;
+type StepOutputs = Arc<tokio::sync::Mutex<HashMap<String, StepFiles>>>;
+
+struct StepDone {
+    id: String,
+    success: bool,
+    files: StepFiles,
+}
 
 pub async fn run_pipeline(
     state: &Arc<AppState>,
@@ -35,8 +45,10 @@ pub async fn run_pipeline(
     // Validate: unique IDs
     let mut id_set = HashSet::new();
     for step in &steps {
-        if step.id.is_empty() {
-            return Err(Status::invalid_argument("step id must not be empty"));
+        validate_step_id(&step.id)?;
+        validate_file_root(&step.file_root)?;
+        for input in &step.inputs {
+            validate_filename(&input.name)?;
         }
         if !id_set.insert(step.id.clone()) {
             return Err(Status::invalid_argument(format!(
@@ -169,9 +181,7 @@ pub async fn run_pipeline(
         }
 
         // Track outputs per step (step_id -> [(filename, path)])
-        let step_outputs: Arc<
-            tokio::sync::Mutex<HashMap<String, Vec<(String, std::path::PathBuf)>>>,
-        > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let step_outputs: StepOutputs = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let mut failed: HashSet<String> = HashSet::new();
         let mut skipped: HashSet<String> = HashSet::new();
@@ -201,10 +211,11 @@ pub async fn run_pipeline(
             .map(|s| s.id.clone())
             .collect();
 
-        let (done_tx, mut done_rx) =
-            mpsc::channel::<(String, bool, Vec<(String, std::path::PathBuf)>)>(32);
+        let (done_tx, mut done_rx) = mpsc::channel::<StepDone>(32);
 
-        let mut active = 0usize;
+        let mut active_steps: HashSet<String> = HashSet::new();
+        let mut cancel_steps: HashMap<String, oneshot::Sender<()>> = HashMap::new();
+        let mut overall_timed_out = false;
 
         loop {
             // Launch ready steps
@@ -334,7 +345,9 @@ pub async fn run_pipeline(
                 })
                 .await;
 
-                active += 1;
+                let (cancel_tx, cancel_rx) = oneshot::channel();
+                active_steps.insert(step_id.clone());
+                cancel_steps.insert(step_id.clone(), cancel_tx);
                 let pipeline_sid_task = pipeline_sid.clone();
                 tokio::spawn(async move {
                     let (event_tx, mut event_rx) = mpsc::channel(32);
@@ -348,7 +361,7 @@ pub async fn run_pipeline(
 
                     let sid_inner = sid.clone();
                     let esid = exec_session_id.clone();
-                    tokio::spawn(async move {
+                    let mut exec_handle = Some(tokio::spawn(async move {
                         if let Err(e) = executor::run_streaming(exec_req, event_tx).await {
                             tracing::error!(
                                 session_id = %esid,
@@ -357,51 +370,29 @@ pub async fn run_pipeline(
                                 "pipeline step exec error"
                             );
                         }
-                    });
+                    }));
 
-                    let mut step_files: Vec<(String, std::path::PathBuf)> = Vec::new();
+                    let mut step_files: StepFiles = Vec::new();
                     let mut success = false;
+                    let mut completed_sent = false;
+                    let mut cancel_rx = cancel_rx;
 
-                    while let Some(event) = event_rx.recv().await {
-                        match event {
-                            StreamEvent::Output(chunk) => {
-                                let _ = out_tx2
-                                    .send(Ok(proto::PipelineOutput {
-                                        payload: Some(proto::pipeline_output::Payload::Step(
-                                            proto::StepEvent {
-                                                step_id: sid.clone(),
-                                                detail: Some(proto::step_event::Detail::Output(
-                                                    chunk,
-                                                )),
-                                            },
-                                        )),
-                                    }))
-                                    .await;
-                            }
-                            StreamEvent::Completed(completed, files) => {
-                                success = completed.status
-                                    == i32::from(proto::RunStatus::Completed)
-                                    && completed.exit_code == 0;
-
-                                let file_meta: Vec<(&str, u64)> = files
-                                    .iter()
-                                    .filter_map(|(n, p)| {
-                                        std::fs::metadata(p).ok().map(|m| (n.as_str(), m.len()))
-                                    })
-                                    .collect();
-
-                                tracing::info!(
-                                    session_id = pipeline_sid_task.as_str(),
-                                    step_id = %sid,
-                                    status = completed.status,
-                                    exit_code = completed.exit_code,
-                                    elapsed_secs = completed.elapsed_seconds,
-                                    output_file_count = files.len(),
-                                    output_files = ?file_meta,
-                                    success,
-                                    "pipeline step completed"
-                                );
-
+                    let cancelled = loop {
+                        tokio::select! {
+                            _ = &mut cancel_rx => {
+                                if completed_sent {
+                                    break false;
+                                }
+                                if let Some(handle) = exec_handle.take() {
+                                    handle.abort();
+                                    let _ = handle.await;
+                                }
+                                let completed = proto::RunCompleted {
+                                    status: proto::RunStatus::TimedOut.into(),
+                                    exit_code: -1,
+                                    elapsed_seconds: 0.0,
+                                    output_files: vec![],
+                                };
                                 let _ = out_tx2
                                     .send(Ok(proto::PipelineOutput {
                                         payload: Some(proto::pipeline_output::Payload::Step(
@@ -414,122 +405,197 @@ pub async fn run_pipeline(
                                         )),
                                     }))
                                     .await;
+                                break true;
+                            }
+                            event = event_rx.recv() => {
+                                let Some(event) = event else {
+                                    break false;
+                                };
+                                match event {
+                                    StreamEvent::Output(chunk) => {
+                                        let _ = out_tx2
+                                            .send(Ok(proto::PipelineOutput {
+                                                payload: Some(proto::pipeline_output::Payload::Step(
+                                                    proto::StepEvent {
+                                                        step_id: sid.clone(),
+                                                        detail: Some(proto::step_event::Detail::Output(
+                                                            chunk,
+                                                        )),
+                                                    },
+                                                )),
+                                            }))
+                                            .await;
+                                    }
+                                    StreamEvent::Completed(completed, files) => {
+                                        success = completed.status
+                                            == i32::from(proto::RunStatus::Completed)
+                                            && completed.exit_code == 0;
+                                        completed_sent = true;
 
-                                // Stream file chunks
-                                for (name, path) in &files {
-                                    let mut file = match tokio::fs::File::open(path).await {
-                                        Ok(f) => f,
-                                        Err(e) => {
-                                            tracing::warn!(
+                                        let file_meta: Vec<(&str, u64)> = files
+                                            .iter()
+                                            .filter_map(|(n, p)| {
+                                                std::fs::metadata(p).ok().map(|m| (n.as_str(), m.len()))
+                                            })
+                                            .collect();
+
+                                        tracing::info!(
+                                            session_id = pipeline_sid_task.as_str(),
+                                            step_id = %sid,
+                                            status = completed.status,
+                                            exit_code = completed.exit_code,
+                                            elapsed_secs = completed.elapsed_seconds,
+                                            output_file_count = files.len(),
+                                            output_files = ?file_meta,
+                                            success,
+                                            "pipeline step completed"
+                                        );
+
+                                        let _ = out_tx2
+                                            .send(Ok(proto::PipelineOutput {
+                                                payload: Some(proto::pipeline_output::Payload::Step(
+                                                    proto::StepEvent {
+                                                        step_id: sid.clone(),
+                                                        detail: Some(proto::step_event::Detail::Completed(
+                                                            completed,
+                                                        )),
+                                                    },
+                                                )),
+                                            }))
+                                            .await;
+
+                                        // Stream file chunks
+                                        for (name, path) in &files {
+                                            let mut file = match tokio::fs::File::open(path).await {
+                                                Ok(f) => f,
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        session_id = pipeline_sid_task.as_str(),
+                                                        step_id = %sid,
+                                                        file = %name,
+                                                        error = %e,
+                                                        "skip step output file (open failed)"
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+
+                                            let len = match file.metadata().await {
+                                                Ok(m) => m.len(),
+                                                Err(_) => 0,
+                                            };
+                                            let num_chunks = len.div_ceil(chunk_size as u64);
+
+                                            let mut buf = vec![0u8; chunk_size];
+                                            let mut first = true;
+
+                                            loop {
+                                                match file.read(&mut buf).await {
+                                                    Ok(0) => {
+                                                        if first {
+                                                            let _ = out_tx2.send(Ok(proto::PipelineOutput {
+                                                                payload: Some(proto::pipeline_output::Payload::Step(
+                                                                    proto::StepEvent {
+                                                                        step_id: sid.clone(),
+                                                                        detail: Some(proto::step_event::Detail::File(
+                                                                            FileChunk {
+                                                                                name: name.clone(),
+                                                                                data: Vec::new(),
+                                                                            }
+                                                                        )),
+                                                                    }
+                                                                ))
+                                                            })).await;
+                                                        }
+                                                        break;
+                                                    }
+                                                    Ok(n) => {
+                                                        let _ = out_tx2.send(Ok(proto::PipelineOutput {
+                                                            payload: Some(proto::pipeline_output::Payload::Step(
+                                                                proto::StepEvent {
+                                                                    step_id: sid.clone(),
+                                                                    detail: Some(proto::step_event::Detail::File(
+                                                                        FileChunk {
+                                                                            name: if first { name.clone() } else { String::new() },
+                                                                            data: buf[..n].to_vec(),
+                                                                        }
+                                                                    )),
+                                                                }
+                                                            ))
+                                                        })).await;
+                                                        first = false;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            session_id = pipeline_sid_task.as_str(),
+                                                            step_id = %sid,
+                                                            file = %name,
+                                                            error = %e,
+                                                            "error reading output file"
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            tracing::info!(
                                                 session_id = pipeline_sid_task.as_str(),
                                                 step_id = %sid,
                                                 file = %name,
-                                                error = %e,
-                                                "skip step output file (open failed)"
+                                                bytes = len,
+                                                chunks = num_chunks,
+                                                chunk_size,
+                                                "streamed pipeline step file to client"
                                             );
-                                            continue;
                                         }
-                                    };
 
-                                    let len = match file.metadata().await {
-                                        Ok(m) => m.len(),
-                                        Err(_) => 0,
-                                    };
-                                    let num_chunks = len.div_ceil(chunk_size as u64);
-
-                                    let mut buf = vec![0u8; chunk_size];
-                                    let mut first = true;
-
-                                    loop {
-                                        match file.read(&mut buf).await {
-                                            Ok(0) => {
-                                                if first {
-                                                    let _ = out_tx2.send(Ok(proto::PipelineOutput {
-                                                        payload: Some(proto::pipeline_output::Payload::Step(
-                                                            proto::StepEvent {
-                                                                step_id: sid.clone(),
-                                                                detail: Some(proto::step_event::Detail::File(
-                                                                    FileChunk {
-                                                                        name: name.clone(),
-                                                                        data: Vec::new(),
-                                                                    }
-                                                                )),
-                                                            }
-                                                        ))
-                                                    })).await;
-                                                }
-                                                break;
-                                            }
-                                            Ok(n) => {
-                                                let _ = out_tx2.send(Ok(proto::PipelineOutput {
-                                                    payload: Some(proto::pipeline_output::Payload::Step(
-                                                        proto::StepEvent {
-                                                            step_id: sid.clone(),
-                                                            detail: Some(proto::step_event::Detail::File(
-                                                                FileChunk {
-                                                                    name: if first { name.clone() } else { String::new() },
-                                                                    data: buf[..n].to_vec(),
-                                                                }
-                                                            )),
-                                                        }
-                                                    ))
-                                                })).await;
-                                                first = false;
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    session_id = pipeline_sid_task.as_str(),
-                                                    step_id = %sid,
-                                                    file = %name,
-                                                    error = %e,
-                                                    "error reading output file"
-                                                );
-                                                break;
-                                            }
-                                        }
+                                        step_files = files;
                                     }
-                                    tracing::info!(
-                                        session_id = pipeline_sid_task.as_str(),
-                                        step_id = %sid,
-                                        file = %name,
-                                        bytes = len,
-                                        chunks = num_chunks,
-                                        chunk_size,
-                                        "streamed pipeline step file to client"
-                                    );
                                 }
-
-                                step_files = files;
                             }
+                        }
+                    };
+
+                    if !cancelled {
+                        if let Some(handle) = exec_handle.take() {
+                            let _ = handle.await;
                         }
                     }
 
-                    let _ = done_tx2.send((sid, success, step_files)).await;
+                    let _ = done_tx2
+                        .send(StepDone {
+                            id: sid,
+                            success,
+                            files: step_files,
+                        })
+                        .await;
                 });
             }
 
             // If no active steps and nothing ready, we're done
-            if active == 0 {
+            if active_steps.is_empty() {
                 break;
             }
 
             // Check overall timeout
             if tokio::time::Instant::now() >= deadline {
+                overall_timed_out = true;
                 break;
             }
 
             // Wait for a step to complete
             tokio::select! {
-                Some((sid, success, files)) = done_rx.recv() => {
-                    active -= 1;
+                Some(done) = done_rx.recv() => {
+                    let sid = done.id;
+                    active_steps.remove(&sid);
+                    cancel_steps.remove(&sid);
                     completed.insert(sid.clone());
 
-                    if !success {
+                    if !done.success {
                         failed.insert(sid.clone());
                     }
 
                     // Store outputs for dependent steps
-                    step_outputs.lock().await.insert(sid.clone(), files);
+                    step_outputs.lock().await.insert(sid.clone(), done.files);
 
                     // Unblock dependents
                     if let Some(dependents) = rev_dep.get(&sid) {
@@ -546,13 +612,56 @@ pub async fn run_pipeline(
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
+                    overall_timed_out = true;
                     break;
                 }
             }
         }
 
+        if overall_timed_out {
+            for (_, cancel_tx) in cancel_steps.drain() {
+                let _ = cancel_tx.send(());
+            }
+
+            while !active_steps.is_empty() {
+                let Some(done) = done_rx.recv().await else {
+                    break;
+                };
+                let sid = done.id;
+                active_steps.remove(&sid);
+                completed.insert(sid.clone());
+                failed.insert(sid.clone());
+                step_outputs.lock().await.insert(sid, done.files);
+            }
+
+            let unfinished: Vec<String> = step_ids
+                .iter()
+                .filter(|id| {
+                    !completed.contains(*id) && !failed.contains(*id) && !skipped.contains(*id)
+                })
+                .cloned()
+                .collect();
+
+            for step_id in unfinished {
+                failed.insert(step_id.clone());
+                send(proto::PipelineOutput {
+                    payload: Some(proto::pipeline_output::Payload::Step(proto::StepEvent {
+                        step_id,
+                        detail: Some(proto::step_event::Detail::Completed(proto::RunCompleted {
+                            status: proto::RunStatus::TimedOut.into(),
+                            exit_code: -1,
+                            elapsed_seconds: 0.0,
+                            output_files: vec![],
+                        })),
+                    })),
+                })
+                .await;
+            }
+        }
+
         let elapsed = start.elapsed();
-        let all_succeeded = failed.is_empty() && skipped.is_empty();
+        let all_succeeded =
+            failed.is_empty() && skipped.is_empty() && completed.len() == step_ids.len();
         let skipped_list: Vec<String> = skipped.into_iter().collect();
 
         info!(

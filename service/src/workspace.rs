@@ -11,19 +11,8 @@ use crate::proto::{
     ListFilesResponse, UploadResponse,
 };
 use crate::session::new_session_id;
+use crate::validation::validate_filename;
 use crate::AppState;
-
-fn validate_filename(name: &str) -> Result<(), Status> {
-    if name.is_empty() {
-        return Err(Status::invalid_argument("filename must not be empty"));
-    }
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
-        return Err(Status::invalid_argument(
-            "filename must not contain '/', '\\', or '..'",
-        ));
-    }
-    Ok(())
-}
 
 pub async fn upload_file(
     state: &Arc<AppState>,
@@ -50,7 +39,9 @@ pub async fn upload_file(
             filename = Some(chunk.name.clone());
 
             let path = state.workspace.join(&chunk.name);
-            let t_path = path.with_extension("tmp_upload");
+            let t_path = state
+                .workspace
+                .join(format!("{}.{}.tmp_upload", chunk.name, session_id));
             final_path = Some(path);
             tmp_path = Some(t_path.clone());
 
