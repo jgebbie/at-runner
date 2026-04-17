@@ -1,5 +1,5 @@
 # Retrieve pre-compiled binaries from the AT repository registry (or a locally-built image).
-ARG AT_IMAGE=ghcr.io/jgebbie/at:latest
+ARG AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2
 FROM ${AT_IMAGE} AS at-binaries
 
 # Stage 2: Build Rust gRPC service

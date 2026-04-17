@@ -4,7 +4,7 @@
 #   ./scripts/clean-rebuild.sh
 #   CLEAN_VENV=0 ./scripts/clean-rebuild.sh        # keep client/python/.venv
 #   CLEAN_AT_TESTS=0 ./scripts/clean-rebuild.sh    # skip fetch-at-tests.sh
-#   PULL_AT=1 ./scripts/clean-rebuild.sh           # docker pull ghcr.io/jgebbie/at:latest first
+#   PULL_AT=1 ./scripts/clean-rebuild.sh           # docker pull ghcr.io/jgebbie/at:at_2026_2_2 first
 #   BUILD_AT_LOCAL=1 ./scripts/clean-rebuild.sh    # build a local AT binaries image from external/at (only if AT_IMAGE is unset)
 #   FORCE_BUILD_AT_LOCAL=1 ./scripts/clean-rebuild.sh  # build local AT image even if AT_IMAGE is set (will override AT_IMAGE)
 #   AT_IMAGE=at-binaries-local ./scripts/clean-rebuild.sh  # use a specific AT image for at-runner
@@ -36,8 +36,8 @@ docker rmi -f at-runner 2>/dev/null || true
 docker buildx prune -f --filter "until=24h" >/dev/null 2>&1 || true
 
 if [[ "$PULL_AT" == "1" ]]; then
-  echo "==> Pulling latest AT base image"
-  docker pull ghcr.io/jgebbie/at:latest
+  echo "==> Pulling pinned AT base image"
+  docker pull ghcr.io/jgebbie/at:at_2026_2_2
 fi
 
 if [[ "$CLEAN_AT_TESTS" == "1" ]]; then

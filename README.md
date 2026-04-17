@@ -36,20 +36,12 @@ Fortran **test fixtures** are not committed here. Use `./scripts/fetch-at-tests.
 
 ### Docker (default / recommended)
 
-The [Dockerfile](Dockerfile) takes an **`AT_IMAGE`** build arg for the first stage (AT binaries). GHCR package access can require credentials, so the local helper scripts default to building an `at-binaries-local` image from `external/at` and then using that as `AT_IMAGE`.
+The [Dockerfile](Dockerfile) takes an **`AT_IMAGE`** build arg for the first stage (AT binaries). The default is pinned to **`ghcr.io/jgebbie/at:at_2026_2_2`** because the `:latest` tag may not carry every platform manifest.
 
-**Recommended local dev path** (no GHCR pull required):
-
-```bash
-./scripts/server-start.sh
-```
-
-On first run this clones `github.com/jgebbie/at` into `external/at/`, builds `at-binaries-local`, builds `at-runner`, and starts the server.
-
-**Pinned GHCR path** (matches what the [release workflow](.github/workflows/release.yml) uses when publishing to GHCR):
+**Recommended** (pinned AT, matches what the [release workflow](.github/workflows/release.yml) uses when publishing to GHCR):
 
 ```bash
-docker build --build-arg AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 -t at-runner .
+docker build -t at-runner .
 docker run -p 50051:50051 \
   --tmpfs /workspace:rw,noexec,nosuid,size=512m \
   at-runner
@@ -61,10 +53,10 @@ If GHCR returns `unauthorized`, authenticate with a GitHub token that can read p
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
 ```
 
-Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`. To force the helper to use GHCR instead of a locally built AT image, disable the local build and optionally override `AT_IMAGE`:
+Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`. The helper also defaults to the pinned GHCR image. Override `AT_IMAGE` to use another published tag or a local artifact image:
 
 ```bash
-BUILD_AT_LOCAL=0 AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 ./scripts/server-start.sh
+AT_IMAGE=at-binaries-local ./scripts/server-start.sh
 ```
 
 ### Local Rust binary

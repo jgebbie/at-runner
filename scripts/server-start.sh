@@ -13,7 +13,7 @@ PORT="${AT_RUNNER_PORT:-50051}"
 MODE="${1:-}"
 if [[ -z "$MODE" || "$MODE" == "--docker" ]]; then
     echo "==> Starting at-runner via Docker on port $PORT"
-    AT_IMAGE="${AT_IMAGE:-ghcr.io/jgebbie/at:latest}"
+    AT_IMAGE="${AT_IMAGE:-ghcr.io/jgebbie/at:at_2026_2_2}"
 
     # Build if image doesn't exist
     if ! docker image inspect at-runner >/dev/null 2>&1; then
