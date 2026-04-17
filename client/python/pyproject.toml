@@ -7,6 +7,7 @@ name = "at-runner"
 version = "0.2.3"
 description = "Python client library for the AT Runner gRPC service"
 requires-python = ">=3.12"
+license = { text = "GPL-3.0-only" }
 dependencies = [
     "grpcio>=1.80",
     "protobuf>=6.31.1",

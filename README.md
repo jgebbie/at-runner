@@ -138,3 +138,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the code of conduct, [Conventional Co
 | AT Runner (this repo) | gRPC service, proto, clients, integration Dockerfile |
 
 Typical linking options: **prebuilt AT base image** (as in this Dockerfile), **git submodule**, or **BuildKit additional context** pointing at an AT checkout — pick one and pin a tag or digest for reproducible builds.
+
+## License
+
+AT Runner is released under the **GNU General Public License v3** only; see
+[LICENSE](LICENSE). This keeps runner distribution aligned with the GPLv3
+Acoustics Toolbox binaries that the service executes in combined images.

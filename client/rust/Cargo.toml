@@ -2,6 +2,7 @@
 name = "at-runner-client"
 version = "0.2.3"
 edition = "2021"
+license = "GPL-3.0-only"
 
 [dependencies]
 tonic = "0.14"
