@@ -36,9 +36,17 @@ Fortran **test fixtures** are not committed here. Use `./scripts/fetch-at-tests.
 
 ### Docker (default / recommended)
 
-The [Dockerfile](Dockerfile) defaults to **`ghcr.io/jgebbie/at:latest`** for the first stage (AT binaries). For **reproducible builds** and for **multi-arch** images (amd64 + arm64), **pin a version tag** on `ghcr.io/jgebbie/at` instead of `:latest` — the AT repo publishes multi-arch manifests for tags like `at_2026_2_2`, while `:latest` is not updated by that automation.
+The [Dockerfile](Dockerfile) takes an **`AT_IMAGE`** build arg for the first stage (AT binaries). GHCR package access can require credentials, so the local helper scripts default to building an `at-binaries-local` image from `external/at` and then using that as `AT_IMAGE`.
 
-**Recommended** (pinned AT, matches what the [release workflow](.github/workflows/release.yml) uses when publishing to GHCR):
+**Recommended local dev path** (no GHCR pull required):
+
+```bash
+./scripts/server-start.sh
+```
+
+On first run this clones `github.com/jgebbie/at` into `external/at/`, builds `at-binaries-local`, builds `at-runner`, and starts the server.
+
+**Pinned GHCR path** (matches what the [release workflow](.github/workflows/release.yml) uses when publishing to GHCR):
 
 ```bash
 docker build --build-arg AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 -t at-runner .
@@ -47,16 +55,16 @@ docker run -p 50051:50051 \
   at-runner
 ```
 
-**Optional** (Dockerfile default — convenient for quick local builds only):
+If GHCR returns `unauthorized`, authenticate with a GitHub token that can read packages, or use the local dev path above:
 
 ```bash
-docker build -t at-runner .
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
 ```
 
-Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`. The helper defaults to **`AT_IMAGE=ghcr.io/jgebbie/at:latest`** when it builds the image; override for a pinned base:
+Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`. To force the helper to use GHCR instead of a locally built AT image, disable the local build and optionally override `AT_IMAGE`:
 
 ```bash
-AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 ./scripts/server-start.sh
+BUILD_AT_LOCAL=0 AT_IMAGE=ghcr.io/jgebbie/at:at_2026_2_2 ./scripts/server-start.sh
 ```
 
 ### Local Rust binary
