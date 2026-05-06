@@ -27,6 +27,8 @@ pub async fn run_pipeline(
     state: &Arc<AppState>,
     request: Request<proto::RunPipelineRequest>,
 ) -> Result<Response<ReceiverStream<Result<proto::PipelineOutput, Status>>>, Status> {
+    // Pipelines execute multiple steps and share intermediate artifacts; we enforce
+    // the same "single active run" rule as Tier-2 `Run` to keep workspace state stable.
     let _write_guard = state
         .exec_lock
         .clone()
@@ -81,6 +83,8 @@ pub async fn run_pipeline(
     }
 
     // Validate: no cycles (topological sort)
+    // We don't actually use the sorted order for execution (the scheduler is dynamic),
+    // but cycle detection here gives a clearer upfront error than "nothing becomes ready".
     let step_ids: Vec<String> = steps.iter().map(|s| s.id.clone()).collect();
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     let mut in_degree: HashMap<String, usize> = HashMap::new();
@@ -188,6 +192,9 @@ pub async fn run_pipeline(
         let mut completed: HashSet<String> = HashSet::new();
 
         // Create temp base dir
+        // Each step runs in its own directory under this temp base. This keeps steps
+        // isolated from each other while still allowing us to "materialize" outputs
+        // from dependencies as inputs for downstream steps.
         let tmp_base = match tempfile::tempdir() {
             Ok(t) => t,
             Err(e) => {
@@ -288,6 +295,8 @@ pub async fn run_pipeline(
                 }
 
                 // Copy outputs from dependency steps into this step's directory
+                // This is the "artifact passing" mechanism: downstream steps see upstream
+                // outputs as local files next to their own workspace + inline inputs.
                 {
                     let outputs_lock = step_outputs.lock().await;
                     for dep_id in &deps {
@@ -380,6 +389,8 @@ pub async fn run_pipeline(
                     let cancelled = loop {
                         tokio::select! {
                             _ = &mut cancel_rx => {
+                                // Pipeline-level timeout/cancel: we abort the per-step task and
+                                // emit a "TimedOut" completion for the step if one wasn't sent yet.
                                 if completed_sent {
                                     break false;
                                 }
@@ -465,6 +476,8 @@ pub async fn run_pipeline(
                                             .await;
 
                                         // Stream file chunks
+                                        // Same chunking convention as Tier-2 Run: first chunk includes
+                                        // the filename, subsequent chunks omit it.
                                         for (name, path) in &files {
                                             let mut file = match tokio::fs::File::open(path).await {
                                                 Ok(f) => f,
@@ -619,6 +632,8 @@ pub async fn run_pipeline(
         }
 
         if overall_timed_out {
+            // Broadcast cancellation to active steps and then drain completions so the
+            // client receives a consistent final status for every step.
             for (_, cancel_tx) in cancel_steps.drain() {
                 let _ = cancel_tx.send(());
             }

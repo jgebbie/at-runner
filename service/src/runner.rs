@@ -24,6 +24,8 @@ impl RunnerService {
     }
 
     fn resolve_executable(&self, model: &str) -> Result<std::path::PathBuf, Status> {
+        // Model names are logical identifiers exposed over gRPC; we only allow
+        // execution of binaries discovered at startup (see `build_allowlist`).
         if !self.state.allowlist.contains(model) {
             return Err(Status::invalid_argument(format!(
                 "unknown model: {model:?} (available: {:?})",
@@ -61,6 +63,8 @@ impl Runner for RunnerService {
         }
         let timeout = self.resolve_timeout(req.timeout_seconds);
 
+        // RunSync is allowed to run concurrently with other RunSync/workspace RPCs,
+        // but not concurrently with Tier-2/Tier-3 runs that execute in the workspace.
         let _guard = self.state.exec_lock.read().await;
 
         let tmp = tempfile::tempdir().map_err(|e| Status::internal(format!("tmpdir: {e}")))?;
@@ -201,6 +205,8 @@ impl Runner for RunnerService {
         validate_file_root(&req.file_root)?;
         let timeout = self.resolve_timeout(req.timeout_seconds);
 
+        // Tier-2 `Run` executes "in place" in the workspace, so we take an exclusive
+        // lock to prevent concurrent uploads/deletes and to enforce single active run.
         let _write_guard = self
             .state
             .exec_lock
@@ -319,6 +325,8 @@ impl Runner for RunnerService {
                         match file.read(&mut buf).await {
                             Ok(0) => {
                                 if first {
+                                    // Empty files still need one "header" chunk so the
+                                    // client learns the filename exists.
                                     let chunk = FileChunk {
                                         name: name.clone(),
                                         data: Vec::new(),
@@ -331,6 +339,8 @@ impl Runner for RunnerService {
                                 break;
                             }
                             Ok(n) => {
+                                // Convention: the filename is only sent on the first
+                                // chunk to reduce per-chunk overhead in the gRPC stream.
                                 let chunk = FileChunk {
                                     name: if first { name.clone() } else { String::new() },
                                     data: buf[..n].to_vec(),

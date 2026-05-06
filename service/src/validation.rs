@@ -9,12 +9,17 @@ fn validate_component(value: &str, field: &str) -> Result<(), Status> {
         )));
     }
 
+    // These values are used to form paths under the configured workspace / run dir.
+    // We only allow a single "path component" to avoid traversal (`../`), absolute
+    // paths, or platform-specific separators.
     if value == "." || value == ".." || value.contains('/') || value.contains('\\') {
         return Err(Status::invalid_argument(format!(
             "{field} must be a single path component"
         )));
     }
 
+    // Extra defense-in-depth: even though we reject separators above, disallowing
+    // `..` prevents surprising filenames and makes intent explicit.
     if value.contains("..") {
         return Err(Status::invalid_argument(format!(
             "{field} must not contain '..'"

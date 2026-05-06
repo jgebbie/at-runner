@@ -59,6 +59,10 @@ pub async fn populate_run_dir(
         let fname = entry.file_name();
         let dest = run_dir.join(&fname);
         if !dest.exists() {
+            // We never overwrite an existing file in `run_dir`:
+            // - for RunSync / pipeline steps, `run_dir` starts empty
+            // - for callers that pre-seed a directory, "run_dir wins" prevents
+            //   workspace state from clobbering injected test fixtures.
             tokio::fs::copy(entry.path(), &dest).await?;
             workspace_copied += 1;
         }
@@ -67,6 +71,8 @@ pub async fn populate_run_dir(
     for (name, data) in inputs {
         validate_filename_for_io(name)?;
         let dest = run_dir.join(name);
+        // Inline inputs intentionally overwrite: they are the explicit per-request
+        // override mechanism for "workspace defaults".
         tokio::fs::write(&dest, data).await?;
     }
 
@@ -120,6 +126,10 @@ pub async fn detect_outputs(
                 _ => false,
             };
             if is_output {
+                // This "mtime delta" heuristic is a pragmatic way to surface the
+                // files created/updated by the subprocess without requiring the
+                // tool to explicitly list outputs. It can miss pure in-place writes
+                // on filesystems with coarse mtimes, but works well for typical tools.
                 outputs.push((name.to_string(), entry.path()));
             }
         }
@@ -148,6 +158,8 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
         .current_dir(&req.run_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // If the async task running this function is dropped (client disconnect,
+        // cancellation, server shutdown), ensure we don't leave a subprocess behind.
         .kill_on_drop(true)
         .spawn()?;
 
@@ -166,6 +178,8 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
     };
 
     let timeout_result = tokio::time::timeout(req.timeout, async {
+        // Read both streams concurrently; reading sequentially can deadlock if one
+        // pipe fills up while we're blocked on the other.
         let (stdout, stderr) = tokio::join!(stdout_fut, stderr_fut);
         let status = child.wait().await?;
         Ok::<_, io::Error>((status, stdout, stderr))
@@ -207,6 +221,8 @@ pub async fn run_buffered(req: ExecRequest) -> io::Result<BufferedResult> {
             Err(e)
         }
         Err(_) => {
+            // Timeout: best-effort terminate, then still report any outputs that
+            // were produced before the kill.
             kill_with_grace(&mut child, sid).await;
             let output_files = detect_outputs(&req.run_dir, &before).await?;
             let outputs_meta: Vec<(&str, u64)> = output_files
@@ -265,6 +281,7 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
     let mut stdout_done = false;
     let mut stderr_done = false;
 
+    // Use an absolute deadline so "busy output" can't starve the timeout.
     let deadline = tokio::time::Instant::now() + req.timeout;
 
     let (status, exit_code) = loop {
@@ -288,6 +305,8 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
                 match res {
                     Ok(0) => stdout_done = true,
                     Ok(n) => {
+                        // Best-effort send: if the receiver is gone, we still keep
+                        // driving the process to completion and rely on logs.
                         let _ = tx.send(StreamEvent::Output(OutputChunk {
                             stream: proto::OutputStream::Stdout.into(),
                             data: stdout_buf[..n].to_vec(),
@@ -300,6 +319,8 @@ pub async fn run_streaming(req: ExecRequest, tx: mpsc::Sender<StreamEvent>) -> i
                 match res {
                     Ok(0) => stderr_done = true,
                     Ok(n) => {
+                        // We don't attempt to preserve exact ordering across streams;
+                        // clients treat stdout/stderr as separate channels.
                         let _ = tx.send(StreamEvent::Output(OutputChunk {
                             stream: proto::OutputStream::Stderr.into(),
                             data: stderr_buf[..n].to_vec(),

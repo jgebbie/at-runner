@@ -21,6 +21,10 @@ pub async fn upload_file(
     let session_id = new_session_id();
     let _guard = state.exec_lock.read().await;
 
+    // Streaming upload protocol:
+    // - first chunk must include `name`
+    // - subsequent chunks must leave `name` empty (saves bytes and prevents ambiguity)
+    // The server writes to a temp file and renames at the end for atomic "publish".
     let mut stream = request.into_inner();
     let mut filename: Option<String> = None;
     let mut final_path: Option<std::path::PathBuf> = None;
@@ -74,6 +78,8 @@ pub async fn upload_file(
             .map_err(|e| Status::internal(format!("sync failed: {e}")))?;
         // Drop the file to close it before renaming
         drop(f);
+        // Atomic replace: clients reading the workspace will only ever observe either
+        // the old file or the fully uploaded file, never a partially written one.
         tokio::fs::rename(&tp, &p)
             .await
             .map_err(|e| Status::internal(format!("rename failed: {e}")))?;
@@ -140,6 +146,7 @@ pub async fn get_file(
             match file.read(&mut buf).await {
                 Ok(0) => {
                     if first {
+                        // Preserve "file exists but empty" semantics.
                         let chunk = FileChunk {
                             name: name.clone(),
                             data: Vec::new(),
@@ -149,6 +156,7 @@ pub async fn get_file(
                     break;
                 }
                 Ok(n) => {
+                    // Convention: filename only appears on the first chunk.
                     let chunk = FileChunk {
                         name: if first { name.clone() } else { String::new() },
                         data: buf[..n].to_vec(),

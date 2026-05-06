@@ -45,6 +45,15 @@ pub struct AppState {
     pub allowlist: HashSet<String>,
     pub default_timeout: u64,
     pub chunk_size: usize,
+    // Concurrency gate for operations that read/write the workspace.
+    //
+    // - `Run` / `RunPipeline` take an *exclusive* (write) lock because they execute
+    //   in the workspace (Tier 2) or copy from it (Tier 3) while also generating
+    //   outputs; allowing concurrent uploads/deletes would make runs nondeterministic.
+    // - `RunSync` and pure workspace RPCs take a *shared* (read) lock so multiple
+    //   clients can upload/list/get when no run is active.
+    //
+    // This is intentionally coarse-grained: it favors predictability over max throughput.
     pub exec_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
@@ -111,6 +120,9 @@ fn build_allowlist(bin_dir: &PathBuf) -> HashSet<String> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        // We treat `*.exe` files as runnable "models" exposed over the API.
+        // The allowlist is constructed once at startup so requests can't execute
+        // arbitrary binaries via path injection.
         if path.extension().and_then(|e| e.to_str()) == Some("exe") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 set.insert(stem.to_string());
