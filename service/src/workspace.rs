@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -12,7 +12,7 @@ use crate::proto::{
 };
 use crate::session::new_session_id;
 use crate::validation::validate_filename;
-use crate::AppState;
+use crate::{files::stream_file_chunks, AppState};
 
 pub async fn upload_file(
     state: &Arc<AppState>,
@@ -115,16 +115,10 @@ pub async fn get_file(
         return Err(Status::not_found(format!("file not found: {}", req.name)));
     }
 
-    let mut file = tokio::fs::File::open(&path)
-        .await
-        .map_err(|e| Status::internal(format!("open failed: {e}")))?;
-
-    let metadata = file
-        .metadata()
+    let chunk_size = state.chunk_size;
+    let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|e| Status::internal(format!("metadata failed: {e}")))?;
-
-    let chunk_size = state.chunk_size;
     let total = metadata.len();
     let num_chunks = total.div_ceil(chunk_size as u64);
     let name = req.name.clone();
@@ -140,39 +134,18 @@ pub async fn get_file(
     let (tx, rx) = mpsc::channel(4);
 
     tokio::spawn(async move {
-        let mut buf = vec![0u8; chunk_size];
-        let mut first = true;
-        loop {
-            match file.read(&mut buf).await {
-                Ok(0) => {
-                    if first {
-                        // Preserve "file exists but empty" semantics.
-                        let chunk = FileChunk {
-                            name: name.clone(),
-                            data: Vec::new(),
-                        };
-                        let _ = tx.send(Ok(chunk)).await;
-                    }
-                    break;
-                }
-                Ok(n) => {
-                    // Convention: filename only appears on the first chunk.
-                    let chunk = FileChunk {
-                        name: if first { name.clone() } else { String::new() },
-                        data: buf[..n].to_vec(),
-                    };
-                    first = false;
-                    if tx.send(Ok(chunk)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(Status::internal(format!("read failed: {e}"))))
-                        .await;
-                    break;
-                }
+        let result = stream_file_chunks(&name, &path, chunk_size, |chunk| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Ok(chunk)).await;
             }
+        })
+        .await;
+
+        if let Err(e) = result {
+            let _ = tx
+                .send(Err(Status::internal(format!("read failed: {e}"))))
+                .await;
         }
     });
 

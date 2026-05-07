@@ -1,4 +1,5 @@
 mod executor;
+mod files;
 mod pipeline;
 mod runner;
 mod session;
@@ -8,9 +9,10 @@ mod workspace;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
-use tonic::transport::Server;
+use tonic::{transport::Server, Status};
 use tracing::{info, warn};
 
 pub mod proto {
@@ -55,6 +57,29 @@ pub struct AppState {
     //
     // This is intentionally coarse-grained: it favors predictability over max throughput.
     pub exec_lock: Arc<tokio::sync::RwLock<()>>,
+}
+
+impl AppState {
+    pub fn resolve_executable(&self, model: &str) -> Result<PathBuf, Status> {
+        // Model names are logical identifiers exposed over gRPC; we only allow
+        // execution of binaries discovered at startup (see `build_allowlist`).
+        if !self.allowlist.contains(model) {
+            return Err(Status::invalid_argument(format!(
+                "unknown model: {model:?} (available: {:?})",
+                self.allowlist
+            )));
+        }
+
+        Ok(self.bin_dir.join(format!("{model}.exe")))
+    }
+
+    pub fn timeout_or_default(&self, requested: Option<u32>) -> Duration {
+        Duration::from_secs(
+            requested
+                .map(|seconds| seconds as u64)
+                .unwrap_or(self.default_timeout),
+        )
+    }
 }
 
 #[tokio::main]

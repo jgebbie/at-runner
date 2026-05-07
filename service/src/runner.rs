@@ -1,7 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -9,6 +7,7 @@ use tracing::Instrument;
 use tracing::{info, warn};
 
 use crate::executor::{self, ExecRequest, StreamEvent};
+use crate::files::stream_file_chunks;
 use crate::proto::{self, runner_server::Runner, FileChunk};
 use crate::session::new_session_id;
 use crate::validation::{validate_file_root, validate_filename};
@@ -21,26 +20,6 @@ pub struct RunnerService {
 impl RunnerService {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
-    }
-
-    fn resolve_executable(&self, model: &str) -> Result<std::path::PathBuf, Status> {
-        // Model names are logical identifiers exposed over gRPC; we only allow
-        // execution of binaries discovered at startup (see `build_allowlist`).
-        if !self.state.allowlist.contains(model) {
-            return Err(Status::invalid_argument(format!(
-                "unknown model: {model:?} (available: {:?})",
-                self.state.allowlist
-            )));
-        }
-        Ok(self.state.bin_dir.join(format!("{model}.exe")))
-    }
-
-    fn resolve_timeout(&self, requested: Option<u32>) -> Duration {
-        Duration::from_secs(
-            requested
-                .map(|t| t as u64)
-                .unwrap_or(self.state.default_timeout),
-        )
     }
 }
 
@@ -56,12 +35,12 @@ impl Runner for RunnerService {
     ) -> Result<Response<proto::RunSyncResponse>, Status> {
         let session_id = new_session_id();
         let req = request.into_inner();
-        let executable = self.resolve_executable(&req.model)?;
+        let executable = self.state.resolve_executable(&req.model)?;
         validate_file_root(&req.file_root)?;
         for input in &req.inputs {
             validate_filename(&input.name)?;
         }
-        let timeout = self.resolve_timeout(req.timeout_seconds);
+        let timeout = self.state.timeout_or_default(req.timeout_seconds);
 
         // RunSync is allowed to run concurrently with other RunSync/workspace RPCs,
         // but not concurrently with Tier-2/Tier-3 runs that execute in the workspace.
@@ -201,9 +180,9 @@ impl Runner for RunnerService {
     ) -> Result<Response<Self::RunStream>, Status> {
         let session_id = new_session_id();
         let req = request.into_inner();
-        let executable = self.resolve_executable(&req.model)?;
+        let executable = self.state.resolve_executable(&req.model)?;
         validate_file_root(&req.file_root)?;
-        let timeout = self.resolve_timeout(req.timeout_seconds);
+        let timeout = self.state.timeout_or_default(req.timeout_seconds);
 
         // Tier-2 `Run` executes "in place" in the workspace, so we take an exclusive
         // lock to prevent concurrent uploads/deletes and to enforce single active run.
@@ -299,76 +278,37 @@ impl Runner for RunnerService {
                 // Phase 4: Stream output files
                 let mut streamed: Vec<(String, u64)> = Vec::new();
                 for (name, path) in &output_files {
-                    let mut file = match tokio::fs::File::open(path).await {
-                        Ok(f) => f,
+                    let streamed_file = stream_file_chunks(name, path, chunk_size, |chunk| {
+                        let tx = out_tx.clone();
+                        async move {
+                            let _ = tx
+                                .send(Ok(proto::RunOutput {
+                                    payload: Some(proto::run_output::Payload::File(chunk)),
+                                }))
+                                .await;
+                        }
+                    })
+                    .await;
+
+                    let streamed_file = match streamed_file {
+                        Ok(streamed_file) => streamed_file,
                         Err(e) => {
                             warn!(
                                 session_id = %sid,
                                 file = %name,
                                 error = %e,
-                                "skip output file (open failed)"
+                                "skip output file (stream failed)"
                             );
                             continue;
                         }
                     };
 
-                    let len = match file.metadata().await {
-                        Ok(m) => m.len(),
-                        Err(_) => 0,
-                    };
-                    let num_chunks = len.div_ceil(chunk_size as u64);
-
-                    let mut buf = vec![0u8; chunk_size];
-                    let mut first = true;
-
-                    loop {
-                        match file.read(&mut buf).await {
-                            Ok(0) => {
-                                if first {
-                                    // Empty files still need one "header" chunk so the
-                                    // client learns the filename exists.
-                                    let chunk = FileChunk {
-                                        name: name.clone(),
-                                        data: Vec::new(),
-                                    };
-                                    let _ = send(proto::RunOutput {
-                                        payload: Some(proto::run_output::Payload::File(chunk)),
-                                    })
-                                    .await;
-                                }
-                                break;
-                            }
-                            Ok(n) => {
-                                // Convention: the filename is only sent on the first
-                                // chunk to reduce per-chunk overhead in the gRPC stream.
-                                let chunk = FileChunk {
-                                    name: if first { name.clone() } else { String::new() },
-                                    data: buf[..n].to_vec(),
-                                };
-                                first = false;
-                                let _ = send(proto::RunOutput {
-                                    payload: Some(proto::run_output::Payload::File(chunk)),
-                                })
-                                .await;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    session_id = %sid,
-                                    file = %name,
-                                    error = %e,
-                                    "error reading output file"
-                                );
-                                break;
-                            }
-                        }
-                    }
-
-                    streamed.push((name.clone(), len));
+                    streamed.push((name.clone(), streamed_file.bytes));
                     info!(
                         session_id = %sid,
                         file = %name,
-                        bytes = len,
-                        chunks = num_chunks,
+                        bytes = streamed_file.bytes,
+                        chunks = streamed_file.chunks,
                         chunk_size,
                         "streamed output file to client"
                     );
