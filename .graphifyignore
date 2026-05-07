@@ -37,8 +37,3 @@ external/at/
 # Local server runtime files
 .server.pid
 .server.log
-
-# Graphify
-.graphify_detect.json
-.graphify_python
-graphify-out
