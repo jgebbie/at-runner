@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "at-runner"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "clap",
  "libc",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "at-runner-client"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "prost",
  "tokio",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "at-test-driver"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "at-runner-client",
  "serde_json",
