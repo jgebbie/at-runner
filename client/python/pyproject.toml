@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oalib-at-runner"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python client library for the AT Runner gRPC service"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.1 (2026-07-03)
+
+### Build
+
+- publish the Python client as the `oalib-at-runner` PyPI package
+- verify unauthenticated GHCR access during releases
+
 ## v0.3.0 (2026-07-02)
 
 ### Feat
