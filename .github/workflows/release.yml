@@ -1,4 +1,4 @@
-name: Release (Docker)
+name: Release
 
 permissions:
   contents: read
@@ -21,6 +21,11 @@ on:
         type: string
       push_latest:
         description: "Also push the latest tag (only if this build should become the default latest)"
+        required: false
+        default: false
+        type: boolean
+      publish_python:
+        description: "Also publish the Python client to PyPI"
         required: false
         default: false
         type: boolean
@@ -88,3 +93,50 @@ jobs:
             AT_IMAGE=${{ env.AT_IMAGE }}
           tags: ${{ steps.meta_push.outputs.tags || steps.meta_dispatch.outputs.tags }}
           labels: ${{ steps.meta_push.outputs.labels || steps.meta_dispatch.outputs.labels }}
+
+      - name: Verify anonymous GHCR access
+        run: |
+          docker logout ghcr.io || true
+          tag="$(printf '%s\n' "${{ steps.meta_push.outputs.tags || steps.meta_dispatch.outputs.tags }}" | head -n 1)"
+          if ! docker buildx imagetools inspect "$tag"; then
+            echo "::error::Anonymous GHCR access failed for $tag. Set the package visibility to Public in the GitHub package settings, then rerun this workflow."
+            exit 1
+          fi
+
+  python-client:
+    name: Build & publish Python client to PyPI
+    if: github.event_name == 'push' || inputs.publish_python
+    needs: docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/oalib-at-runner/
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Build Python client distributions
+        run: python -m build client/python
+
+      - name: Check Python client distributions
+        run: python -m twine check client/python/dist/*
+
+      - name: Upload Python client distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-client-dist
+          path: client/python/dist/*
+
+      - name: Publish Python client to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: client/python/dist/

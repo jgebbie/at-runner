@@ -13,7 +13,7 @@ For **API design, session model, supported executables, streaming behavior, and 
 ├── proto/              # at.runner.v1 — shared by server and clients
 ├── service/            # Rust gRPC server (at-runner binary)
 ├── client/
-│   ├── python/         # at_runner package
+│   ├── python/         # oalib-at-runner distribution, at_runner import package
 │   └── rust/           # Rust client crate
 ├── scripts/            # Server helpers, smoke/integration/sweep tests
 ├── testing/            # Docker Compose + Python/Rust test drivers
@@ -47,11 +47,12 @@ docker run -p 50051:50051 \
   at-runner
 ```
 
-If GHCR returns `unauthorized`, authenticate with a GitHub token that can read packages, or use the local dev path above:
-
-```bash
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USER" --password-stdin
-```
+The published runner image is intended to be public and pullable without `docker login`.
+If GHCR returns `unauthorized`, the GitHub package visibility is not public yet;
+set `ghcr.io/jgebbie/at-runner` to **Public** in the package settings and rerun
+the release workflow. Public source builds that use the default `AT_IMAGE` also
+need the `ghcr.io/jgebbie/at` package to be public; otherwise override
+`AT_IMAGE` with a readable image or local artifact.
 
 Helper (default Docker): `./scripts/server-start.sh` and `./scripts/server-stop.sh`. The helper also defaults to the pinned GHCR image. Override `AT_IMAGE` to use another published tag or a local artifact image:
 
@@ -115,6 +116,23 @@ If you see widespread `SIGILL` / “Illegal instruction” failures from AT exec
 
 ```bash
 BUILD_AT_LOCAL=1 ./scripts/test-sweep-compose.sh
+```
+
+## Python client
+
+The Python client is published to PyPI as **`oalib-at-runner`** and imported as
+`at_runner`:
+
+```bash
+python -m pip install oalib-at-runner
+```
+
+For local development from this checkout, keep using the editable install:
+
+```bash
+python3 -m venv client/python/.venv
+. client/python/.venv/bin/activate
+pip install -e './client/python[dev]'
 ```
 
 ## Conventions (summary)

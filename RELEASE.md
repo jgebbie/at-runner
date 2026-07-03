@@ -30,7 +30,30 @@ Commitizen runs **`post_bump_hooks` after the bump commit and tag**. The root **
 6. Review the commit diff (especially `Cargo.lock` and changelog).
 7. Push the branch and the tag: `git push origin main` and `git push origin vX.Y.Z` (adjust branch/tag names as appropriate).
 
-Pushing the **`v*`** tag triggers the [Docker release workflow](.github/workflows/release.yml) (publish to GHCR).
+Pushing the **`v*`** tag triggers the [release workflow](.github/workflows/release.yml):
+
+- publish the runner image to GHCR;
+- verify the GHCR image is anonymously readable;
+- build, check, and publish the Python client distribution
+  **`oalib-at-runner`** to PyPI.
+
+Before the first PyPI release, configure PyPI Trusted Publishing for:
+
+- Owner: `jgebbie`
+- Repository: `at-runner`
+- Workflow: `release.yml`
+- Environment: `pypi`
+
+Because `v0.3.0` predates Python publishing in this workflow, a maintainer can
+backfill that first PyPI release with `workflow_dispatch` after the trusted
+publisher and GHCR visibility are configured. Use the existing image tag and set
+`publish_python` to true.
+
+Before relying on public container pulls, set the GitHub package
+`ghcr.io/jgebbie/at-runner` to **Public** in the package settings. Public GHCR
+container packages are anonymously pullable; the release workflow verifies this
+after publishing. If public users should also build this Dockerfile with the
+default `AT_IMAGE`, set `ghcr.io/jgebbie/at` to **Public** as well.
 
 ## If the pre-bump hook fails
 

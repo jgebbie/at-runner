@@ -1,13 +1,22 @@
 [build-system]
-requires = ["setuptools>=68", "grpcio-tools>=1.62"]
+requires = ["setuptools>=77", "grpcio-tools>=1.62"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "at-runner"
+name = "oalib-at-runner"
 version = "0.3.0"
 description = "Python client library for the AT Runner gRPC service"
+readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "GPL-3.0-only" }
+license = "GPL-3.0-only"
+keywords = ["acoustics", "acoustics-toolbox", "bellhop", "grpc", "oalib"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "grpcio>=1.80",
     "protobuf>=6.31.1",
@@ -21,3 +30,8 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.urls]
+Homepage = "https://github.com/jgebbie/at-runner"
+Repository = "https://github.com/jgebbie/at-runner"
+Issues = "https://github.com/jgebbie/at-runner/issues"

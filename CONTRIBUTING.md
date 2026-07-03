@@ -148,8 +148,9 @@ Automation lives under [`.github/workflows/`](.github/workflows/).
 
 | Workflow | Purpose |
 |----------|---------|
-| **CI** | **Prek** hooks; Rust workspace `clippy` / `build` / `test` (server + test driver; client crate tests compiled with `--no-run` because integration tests need a running server); Python client install + byte-compile — on pushes and PRs to **`main`**. |
+| **CI** | **Prek** hooks; Rust workspace `clippy` / `build` / `test` (server + test driver; client crate tests compiled with `--no-run` because integration tests need a running server); Python client install, byte-compile, package build, and `twine check` — on pushes and PRs to **`main`**. |
 | **Commit messages** | On pull requests, validates that commits in the PR range follow Conventional Commits (`cz check`). |
+| **Release** | On `v*` tags, publishes the GHCR runner image, verifies anonymous GHCR access, and publishes the Python client distribution `oalib-at-runner` to PyPI through Trusted Publishing. |
 
 Forks receive the same checks on PRs.
 
